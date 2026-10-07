@@ -39,6 +39,7 @@ public class OrderService {
                 .build();
 
         BigDecimal totalAmount = BigDecimal.ZERO;
+        Long sellerId = null; // 🟢 नया: सेलर आईडी स्टोर करने के लिए
 
         // 2. Process Order Items & Check Variant Stock
         for (var itemDto : requestDto.getItems()) {
@@ -47,6 +48,12 @@ public class OrderService {
 
             if (variant.getStock() < itemDto.getQuantity()) {
                 throw new RuntimeException("Insufficient stock for SKU: " + variant.getSku());
+            }
+
+            // 🟢 नया: पहले आइटम से प्रोडक्ट का सेलर निकालकर ऑर्डर में सेव कर दें
+            if (sellerId == null) {
+                sellerId = variant.getProduct().getSellerId();
+                order.setSellerId(sellerId);
             }
 
             // Reduce variant stock
@@ -60,7 +67,6 @@ public class OrderService {
             OrderItem orderItem = OrderItem.builder()
                     .order(order)
                     .product(variant.getProduct()) // Parent product reference
-                    // Note: If OrderItem entity has variant reference, update it here accordingly
                     .quantity(itemDto.getQuantity())
                     .price(variant.getSellingPrice())
                     .build();
@@ -76,6 +82,13 @@ public class OrderService {
 
     public List<OrderResponseDto> getAllOrders() {
         return orderRepository.findAll().stream()
+                .map(this::mapToResponseDto)
+                .collect(Collectors.toList());
+    }
+
+    // 🟢 नया मेथड: जो OrderController में सेलर के लिए कॉल होगा
+    public List<OrderResponseDto> getOrdersBySellerId(Long sellerId) {
+        return orderRepository.findBySellerId(sellerId).stream()
                 .map(this::mapToResponseDto)
                 .collect(Collectors.toList());
     }

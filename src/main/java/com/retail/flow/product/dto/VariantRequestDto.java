@@ -21,7 +21,7 @@ public class VariantRequestDto {
     private BigDecimal sellingPrice;
 
     @NotNull(message = "Purchase price is required")
-    @DecimalMin(value = "0.0", inclusive = false, message = "Purchase price must be greater than zero")
+    @DecimalMin(value = "0.0", inclusive = true, message = "Purchase price must be greater than zero")
     private BigDecimal purchasePrice;
 
     @NotNull(message = "Stock is required")

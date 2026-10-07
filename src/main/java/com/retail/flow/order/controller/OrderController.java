@@ -29,4 +29,11 @@ public class OrderController {
         List<OrderResponseDto> orders = orderService.getAllOrders();
         return ResponseEntity.ok(orders);
     }
+
+    // 🟢 बस यह नई API जोड़नी थी ताकि Seller App को डेटा मिल सके
+    @GetMapping("/seller/{sellerId}")
+    public ResponseEntity<List<OrderResponseDto>> getOrdersBySellerId(@PathVariable Long sellerId) {
+        List<OrderResponseDto> orders = orderService.getOrdersBySellerId(sellerId);
+        return ResponseEntity.ok(orders);
+    }
 }

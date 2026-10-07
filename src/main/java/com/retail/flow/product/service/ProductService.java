@@ -2,10 +2,14 @@ package com.retail.flow.product.service;
 
 import com.retail.flow.product.dto.ProductRequestDto;
 import com.retail.flow.product.dto.ProductResponseDto;
+// 🟢 NAYA CODE: StockUpdateRequestDto import kiya gaya hai
+import com.retail.flow.product.dto.StockUpdateRequestDto;
 import com.retail.flow.product.entity.Product;
 import com.retail.flow.product.entity.ProductImage;
 import com.retail.flow.product.entity.ProductVariant;
 import com.retail.flow.product.repository.ProductRepository;
+// 🟢 NAYA CODE: Variant Repository import kiya gaya hai
+import com.retail.flow.product.repository.ProductVariantRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,6 +22,9 @@ import java.util.stream.Collectors;
 public class ProductService {
 
     private final ProductRepository productRepository;
+
+    // 🟢 NAYA CODE: Variant ko update karne ke liye variantRepository yahan add kiya gaya hai
+    private final ProductVariantRepository variantRepository;
 
     @Transactional
     public ProductResponseDto createProduct(ProductRequestDto requestDto) {
@@ -81,6 +88,29 @@ public class ProductService {
 
         // यहाँ अब सही मेथड कॉल हो रहा है जो डेटा मैप करके देगा
         return mapToResponseDto(product);
+    }
+
+    // 🟢 NAYA CODE: Stock update karne ka method yahan mapToResponseDto ke theek upar add kiya gaya hai
+    @Transactional
+    public ProductResponseDto.VariantResponseDto updateVariantStock(Long variantId, StockUpdateRequestDto requestDto) {
+        // 1. Variant को डेटाबेस से निकालें
+        ProductVariant variant = variantRepository.findById(variantId)
+                .orElseThrow(() -> new RuntimeException("Variant not found with id: " + variantId));
+
+        // 2. नया स्टॉक सेट करें और सेव करें
+        variant.setStock(requestDto.getStock());
+        ProductVariant savedVariant = variantRepository.save(variant);
+
+        // 3. Response DTO में मैप करके वापस भेजें
+        return ProductResponseDto.VariantResponseDto.builder()
+                .id(savedVariant.getId())
+                .sku(savedVariant.getSku())
+                .size(savedVariant.getSize())
+                .color(savedVariant.getColor())
+                .sellingPrice(savedVariant.getSellingPrice())
+                .purchasePrice(savedVariant.getPurchasePrice())
+                .stock(savedVariant.getStock())
+                .build();
     }
 
     private ProductResponseDto mapToResponseDto(Product product) {

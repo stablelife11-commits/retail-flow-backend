@@ -25,6 +25,10 @@ public class Order {
     @JoinColumn(name = "customer_id", nullable = false)
     private Customer customer;
 
+    // 🟢 NAYA COLUMN: Seller ko order se link karne ke liye
+    @Column(name = "seller_id", nullable = false)
+    private Long sellerId;
+
     @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<OrderItem> orderItems;
 

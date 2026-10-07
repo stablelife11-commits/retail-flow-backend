@@ -2,6 +2,7 @@ package com.retail.flow.product.controller;
 
 import com.retail.flow.product.dto.ProductRequestDto;
 import com.retail.flow.product.dto.ProductResponseDto;
+import com.retail.flow.product.dto.StockUpdateRequestDto;
 import com.retail.flow.product.service.ProductService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -33,5 +34,13 @@ public class ProductController {
     public ResponseEntity<ProductResponseDto> getProductById(@PathVariable Long id) {
         ProductResponseDto response = productService.getProductById(id);
         return ResponseEntity.ok(response);
+    }
+    @PatchMapping("/variants/{variantId}/stock")
+    public ResponseEntity<ProductResponseDto.VariantResponseDto> updateVariantStock(
+            @PathVariable Long variantId,
+            @Valid @RequestBody StockUpdateRequestDto requestDto) {
+
+        ProductResponseDto.VariantResponseDto updatedVariant = productService.updateVariantStock(variantId, requestDto);
+        return ResponseEntity.ok(updatedVariant);
     }
 }
