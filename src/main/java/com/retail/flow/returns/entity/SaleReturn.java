@@ -7,7 +7,8 @@ import java.util.List;
 
 @Entity
 @Table(name = "sale_returns")
-@Data
+@Getter
+@Setter
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor

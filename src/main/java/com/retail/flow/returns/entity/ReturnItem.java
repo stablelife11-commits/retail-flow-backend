@@ -5,7 +5,8 @@ import lombok.*;
 
 @Entity
 @Table(name = "return_items")
-@Data
+@Getter
+@Setter
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
@@ -14,7 +15,7 @@ public class ReturnItem {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @ManyToOne
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "return_id")
     private SaleReturn saleReturn;
 
