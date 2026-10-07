@@ -10,4 +10,5 @@ import java.util.Optional;
 public interface CustomerRepository extends JpaRepository<Customer, Long> {
     Optional<Customer> findByMobile(String mobile);
     boolean existsByMobile(String mobile);
+    Optional<Customer> findByEmail(String email); // 🟢 SECURITY FIX: To find customer by JWT Email
 }

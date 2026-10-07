@@ -25,16 +25,22 @@ public class ProductController {
         return new ResponseEntity<>(response, HttpStatus.CREATED);
     }
 
+    // 🟢 FIX: Accept optional 'page' and 'size' parameters
+    // Agar Android app page aur size nahi bhejta, toh default page 0 (first page) aur size 20 set hoga.
     @GetMapping
-    public ResponseEntity<List<ProductResponseDto>> getAllProducts() {
-        List<ProductResponseDto> products = productService.getAllProducts();
+    public ResponseEntity<List<ProductResponseDto>> getAllProducts(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        List<ProductResponseDto> products = productService.getAllProducts(page, size);
         return ResponseEntity.ok(products);
     }
+
     @GetMapping("/{id}")
     public ResponseEntity<ProductResponseDto> getProductById(@PathVariable Long id) {
         ProductResponseDto response = productService.getProductById(id);
         return ResponseEntity.ok(response);
     }
+
     @PatchMapping("/variants/{variantId}/stock")
     public ResponseEntity<ProductResponseDto.VariantResponseDto> updateVariantStock(
             @PathVariable Long variantId,

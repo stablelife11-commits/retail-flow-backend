@@ -3,6 +3,7 @@ package com.retail.flow.common.security;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -36,8 +37,22 @@ public class SecurityConfig {
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/api/v1/auth/**").permitAll() // Public auth endpoints
-                        .anyRequest().authenticated() // All other endpoints require JWT authentication
+                        .requestMatchers("/api/v1/auth/**").permitAll() // Public endpoints
+
+                        // 🟢 FIX: STRICT ROLE-BASED ACCESS CONTROL (RBAC)
+                        // Sirf SELLER ya ADMIN hi Products add/update kar sakte hain
+                        .requestMatchers(HttpMethod.POST, "/api/v1/products/**").hasAnyRole("SELLER", "ADMIN")
+                        .requestMatchers(HttpMethod.PATCH, "/api/v1/products/**").hasAnyRole("SELLER", "ADMIN")
+
+                        // Sirf SELLER/ADMIN in backend management APIs ko dekh/use kar sakte hain
+                        .requestMatchers("/api/v1/sales/**").hasAnyRole("SELLER", "ADMIN")
+                        .requestMatchers("/api/v1/purchases/**").hasAnyRole("SELLER", "ADMIN")
+                        .requestMatchers("/api/v1/reports/**").hasAnyRole("SELLER", "ADMIN")
+                        .requestMatchers("/api/v1/returns/**").hasAnyRole("SELLER", "ADMIN")
+                        .requestMatchers("/api/v1/suppliers/**").hasAnyRole("SELLER", "ADMIN")
+
+                        // Baaki sabhi requests (jaise GET products, GET/POST orders) koi bhi logged-in user kar sakta hai
+                        .anyRequest().authenticated()
                 );
 
         http.addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);

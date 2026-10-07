@@ -27,10 +27,11 @@ public class OrderService {
     private final ProductVariantRepository productVariantRepository;
 
     @Transactional
-    public OrderResponseDto createOrder(OrderRequestDto requestDto) {
-        // 1. Validate Customer
-        Customer customer = customerRepository.findById(requestDto.getCustomerId())
-                .orElseThrow(() -> new RuntimeException("Customer not found with id: " + requestDto.getCustomerId()));
+    public OrderResponseDto createOrder(OrderRequestDto requestDto, String userEmail) {
+        // 🟢 SECURITY FIX: We completely ignore requestDto.getCustomerId()
+        // We fetch the true customer based on the mathematically verified JWT Token (userEmail).
+        Customer customer = customerRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("Customer profile not found for email: " + userEmail));
 
         Order order = Order.builder()
                 .customer(customer)
@@ -39,9 +40,8 @@ public class OrderService {
                 .build();
 
         BigDecimal totalAmount = BigDecimal.ZERO;
-        Long sellerId = null; // 🟢 नया: सेलर आईडी स्टोर करने के लिए
+        Long sellerId = null;
 
-        // 2. Process Order Items & Check Variant Stock
         for (var itemDto : requestDto.getItems()) {
             ProductVariant variant = productVariantRepository.findById(itemDto.getVariantId())
                     .orElseThrow(() -> new RuntimeException("Product variant not found with id: " + itemDto.getVariantId()));
@@ -50,23 +50,21 @@ public class OrderService {
                 throw new RuntimeException("Insufficient stock for SKU: " + variant.getSku());
             }
 
-            // 🟢 नया: पहले आइटम से प्रोडक्ट का सेलर निकालकर ऑर्डर में सेव कर दें
             if (sellerId == null) {
                 sellerId = variant.getProduct().getSellerId();
                 order.setSellerId(sellerId);
             }
 
-            // Reduce variant stock
+            // Note: Inline stock deduction (Will be fixed properly in the Concurrency Phase with Optimistic Locking)
             variant.setStock(variant.getStock() - itemDto.getQuantity());
             productVariantRepository.save(variant);
 
-            // Calculate item total price using selling price
             BigDecimal itemPrice = variant.getSellingPrice().multiply(BigDecimal.valueOf(itemDto.getQuantity()));
             totalAmount = totalAmount.add(itemPrice);
 
             OrderItem orderItem = OrderItem.builder()
                     .order(order)
-                    .product(variant.getProduct()) // Parent product reference
+                    .product(variant.getProduct())
                     .quantity(itemDto.getQuantity())
                     .price(variant.getSellingPrice())
                     .build();
@@ -86,7 +84,16 @@ public class OrderService {
                 .collect(Collectors.toList());
     }
 
-    // 🟢 नया मेथड: जो OrderController में सेलर के लिए कॉल होगा
+    // 🟢 SECURITY FIX: Secure method to get ONLY the logged-in customer's orders
+    public List<OrderResponseDto> getMyOrders(String userEmail) {
+        Customer customer = customerRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("Customer profile not found for email: " + userEmail));
+
+        return orderRepository.findByCustomerId(customer.getId()).stream()
+                .map(this::mapToResponseDto)
+                .collect(Collectors.toList());
+    }
+
     public List<OrderResponseDto> getOrdersBySellerId(Long sellerId) {
         return orderRepository.findBySellerId(sellerId).stream()
                 .map(this::mapToResponseDto)

@@ -2,15 +2,16 @@ package com.retail.flow.product.service;
 
 import com.retail.flow.product.dto.ProductRequestDto;
 import com.retail.flow.product.dto.ProductResponseDto;
-// 🟢 NAYA CODE: StockUpdateRequestDto import kiya gaya hai
 import com.retail.flow.product.dto.StockUpdateRequestDto;
 import com.retail.flow.product.entity.Product;
 import com.retail.flow.product.entity.ProductImage;
 import com.retail.flow.product.entity.ProductVariant;
 import com.retail.flow.product.repository.ProductRepository;
-// 🟢 NAYA CODE: Variant Repository import kiya gaya hai
 import com.retail.flow.product.repository.ProductVariantRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.PageRequest; // 🟢 NAYA
+import org.springframework.data.domain.Pageable; // 🟢 NAYA
+import org.springframework.data.domain.Sort; // 🟢 NAYA
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,13 +23,10 @@ import java.util.stream.Collectors;
 public class ProductService {
 
     private final ProductRepository productRepository;
-
-    // 🟢 NAYA CODE: Variant ko update karne ke liye variantRepository yahan add kiya gaya hai
     private final ProductVariantRepository variantRepository;
 
     @Transactional
     public ProductResponseDto createProduct(ProductRequestDto requestDto) {
-        // Check uniqueness scoped to seller
         productRepository.findBySellerIdAndProductCode(requestDto.getSellerId(), requestDto.getProductCode())
                 .ifPresent(p -> {
                     throw new RuntimeException("Product code already exists for this seller.");
@@ -44,7 +42,6 @@ public class ProductService {
                 .active(true)
                 .build();
 
-        // Map Variants
         List<ProductVariant> variants = requestDto.getVariants().stream()
                 .map(vDto -> ProductVariant.builder()
                         .product(product)
@@ -59,7 +56,6 @@ public class ProductService {
 
         product.setVariants(variants);
 
-        // Map Images if present
         if (requestDto.getImageUrls() != null && !requestDto.getImageUrls().isEmpty()) {
             List<ProductImage> images = requestDto.getImageUrls().stream()
                     .map(url -> ProductImage.builder()
@@ -68,7 +64,7 @@ public class ProductService {
                             .isPrimary(false)
                             .build())
                     .collect(Collectors.toList());
-            images.get(0).setIsPrimary(true); // Set first as primary
+            images.get(0).setIsPrimary(true);
             product.setImages(images);
         }
 
@@ -76,8 +72,10 @@ public class ProductService {
         return mapToResponseDto(savedProduct);
     }
 
-    public List<ProductResponseDto> getAllProducts() {
-        return productRepository.findAll().stream()
+    // 🟢 FIX: Backend now handles exact Pages & Sizes (Sorted by newest first)
+    public List<ProductResponseDto> getAllProducts(int page, int size) {
+        Pageable pageable = PageRequest.of(page, size, Sort.by("id").descending());
+        return productRepository.findAll(pageable).stream()
                 .map(this::mapToResponseDto)
                 .collect(Collectors.toList());
     }
@@ -85,23 +83,17 @@ public class ProductService {
     public ProductResponseDto getProductById(Long id) {
         Product product = productRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Product not found with id: " + id));
-
-        // यहाँ अब सही मेथड कॉल हो रहा है जो डेटा मैप करके देगा
         return mapToResponseDto(product);
     }
 
-    // 🟢 NAYA CODE: Stock update karne ka method yahan mapToResponseDto ke theek upar add kiya gaya hai
     @Transactional
     public ProductResponseDto.VariantResponseDto updateVariantStock(Long variantId, StockUpdateRequestDto requestDto) {
-        // 1. Variant को डेटाबेस से निकालें
         ProductVariant variant = variantRepository.findById(variantId)
                 .orElseThrow(() -> new RuntimeException("Variant not found with id: " + variantId));
 
-        // 2. नया स्टॉक सेट करें और सेव करें
         variant.setStock(requestDto.getStock());
         ProductVariant savedVariant = variantRepository.save(variant);
 
-        // 3. Response DTO में मैप करके वापस भेजें
         return ProductResponseDto.VariantResponseDto.builder()
                 .id(savedVariant.getId())
                 .sku(savedVariant.getSku())

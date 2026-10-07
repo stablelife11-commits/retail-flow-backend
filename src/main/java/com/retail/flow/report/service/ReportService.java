@@ -8,6 +8,7 @@ import com.retail.flow.sale.repository.SaleRepository;
 import com.retail.flow.supplier.repository.SupplierRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 
@@ -21,16 +22,11 @@ public class ReportService {
     private final ProductRepository productRepository;
     private final SupplierRepository supplierRepository;
 
+    @Transactional(readOnly = true)
     public DashboardSummaryDto getDashboardSummary() {
-        // Calculate Total Sales
-        BigDecimal totalSales = saleRepository.findAll().stream()
-                .map(sale -> sale.getTotalAmount())
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-        // Calculate Total Purchases
-        BigDecimal totalPurchases = purchaseRepository.findAll().stream()
-                .map(purchase -> purchase.getTotalAmount())
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        // 🟢 PERFORMANCE FIX: No more memory overflow. Fast DB aggregation.
+        BigDecimal totalSales = saleRepository.sumTotalSales();
+        BigDecimal totalPurchases = purchaseRepository.sumTotalPurchases();
 
         return DashboardSummaryDto.builder()
                 .totalSalesAmount(totalSales)

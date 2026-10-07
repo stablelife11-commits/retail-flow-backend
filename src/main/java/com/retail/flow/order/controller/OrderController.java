@@ -7,6 +7,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -19,8 +20,9 @@ public class OrderController {
     private final OrderService orderService;
 
     @PostMapping
-    public ResponseEntity<OrderResponseDto> createOrder(@Valid @RequestBody OrderRequestDto requestDto) {
-        OrderResponseDto response = orderService.createOrder(requestDto);
+    public ResponseEntity<OrderResponseDto> createOrder(@Valid @RequestBody OrderRequestDto requestDto, Authentication authentication) {
+        // 🟢 Pass the verified email from the JWT token to the service
+        OrderResponseDto response = orderService.createOrder(requestDto, authentication.getName());
         return new ResponseEntity<>(response, HttpStatus.CREATED);
     }
 
@@ -30,7 +32,13 @@ public class OrderController {
         return ResponseEntity.ok(orders);
     }
 
-    // 🟢 बस यह नई API जोड़नी थी ताकि Seller App को डेटा मिल सके
+    // 🟢 SECURITY FIX: Secure endpoint for Customer App
+    @GetMapping("/my-orders")
+    public ResponseEntity<List<OrderResponseDto>> getMyOrders(Authentication authentication) {
+        List<OrderResponseDto> orders = orderService.getMyOrders(authentication.getName());
+        return ResponseEntity.ok(orders);
+    }
+
     @GetMapping("/seller/{sellerId}")
     public ResponseEntity<List<OrderResponseDto>> getOrdersBySellerId(@PathVariable Long sellerId) {
         List<OrderResponseDto> orders = orderService.getOrdersBySellerId(sellerId);
