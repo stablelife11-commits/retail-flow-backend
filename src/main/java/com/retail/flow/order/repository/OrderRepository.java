@@ -10,14 +10,14 @@ import java.util.List;
 @Repository
 public interface OrderRepository extends JpaRepository<Order, Long> {
 
-    // 🟢 PERFORMANCE FIX: N+1 प्रॉब्लम रोकने के लिए JOINs का इस्तेमाल
-    @EntityGraph(attributePaths = {"customer", "orderItems", "orderItems.product"})
+    // 🟢 FIX: Updated attribute paths to match ProductVariant
+    @EntityGraph(attributePaths = {"customer", "orderItems", "orderItems.productVariant", "orderItems.productVariant.product"})
     List<Order> findBySellerId(Long sellerId);
 
-    @EntityGraph(attributePaths = {"customer", "orderItems", "orderItems.product"})
+    @EntityGraph(attributePaths = {"customer", "orderItems", "orderItems.productVariant", "orderItems.productVariant.product"})
     List<Order> findByCustomerId(Long customerId);
 
     @Override
-    @EntityGraph(attributePaths = {"customer", "orderItems", "orderItems.product"})
+    @EntityGraph(attributePaths = {"customer", "orderItems", "orderItems.productVariant", "orderItems.productVariant.product"})
     List<Order> findAll();
 }

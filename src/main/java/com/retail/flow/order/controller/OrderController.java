@@ -44,4 +44,10 @@ public class OrderController {
         List<OrderResponseDto> orders = orderService.getOrdersBySellerId(sellerId);
         return ResponseEntity.ok(orders);
     }
+    // Controller me existing code ke sath yeh method jod dein:
+    @PatchMapping("/{id}/status")
+    public ResponseEntity<OrderResponseDto> updateOrderStatus(@PathVariable Long id, @RequestParam String status) {
+        OrderResponseDto response = orderService.updateOrderStatus(id, status);
+        return ResponseEntity.ok(response);
+    }
 }

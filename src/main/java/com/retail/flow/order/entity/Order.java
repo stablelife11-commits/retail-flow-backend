@@ -25,7 +25,6 @@ public class Order {
     @JoinColumn(name = "customer_id", nullable = false)
     private Customer customer;
 
-    // 🟢 NAYA COLUMN: Seller ko order se link karne ke liye
     @Column(name = "seller_id", nullable = false)
     private Long sellerId;
 
@@ -37,6 +36,14 @@ public class Order {
 
     @Column(nullable = false)
     private LocalDateTime orderDate;
+
+    // 🟢 NAYA: Delivery Address (Customer app se aayega)
+    private String deliveryAddress;
+
+    // 🟢 NAYA: Order Status Tracker (PLACED, CONFIRMED, SHIPPED, DELIVERED)
+    @Column(nullable = false)
+    @Builder.Default
+    private String status = "PLACED";
 
     @PrePersist
     public void prePersist() {

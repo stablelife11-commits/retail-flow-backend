@@ -1,5 +1,6 @@
 package com.retail.flow.order.service;
 
+import com.retail.flow.common.exception.BusinessValidationException;
 import com.retail.flow.customer.entity.Customer;
 import com.retail.flow.customer.repository.CustomerRepository;
 import com.retail.flow.order.dto.OrderRequestDto;
@@ -28,15 +29,15 @@ public class OrderService {
 
     @Transactional
     public OrderResponseDto createOrder(OrderRequestDto requestDto, String userEmail) {
-        // 🟢 SECURITY FIX: We completely ignore requestDto.getCustomerId()
-        // We fetch the true customer based on the mathematically verified JWT Token (userEmail).
         Customer customer = customerRepository.findByEmail(userEmail)
-                .orElseThrow(() -> new RuntimeException("Customer profile not found for email: " + userEmail));
+                .orElseThrow(() -> new BusinessValidationException("Customer profile not found"));
 
         Order order = Order.builder()
                 .customer(customer)
                 .orderItems(new ArrayList<>())
                 .totalAmount(BigDecimal.ZERO)
+                .deliveryAddress(requestDto.getDeliveryAddress()) // 🟢 ADDED
+                .status("PLACED") // 🟢 ADDED
                 .build();
 
         BigDecimal totalAmount = BigDecimal.ZERO;
@@ -44,10 +45,10 @@ public class OrderService {
 
         for (var itemDto : requestDto.getItems()) {
             ProductVariant variant = productVariantRepository.findById(itemDto.getVariantId())
-                    .orElseThrow(() -> new RuntimeException("Product variant not found with id: " + itemDto.getVariantId()));
+                    .orElseThrow(() -> new BusinessValidationException("Variant not found: " + itemDto.getVariantId()));
 
             if (variant.getStock() < itemDto.getQuantity()) {
-                throw new RuntimeException("Insufficient stock for SKU: " + variant.getSku());
+                throw new BusinessValidationException("Insufficient stock for SKU: " + variant.getSku());
             }
 
             if (sellerId == null) {
@@ -55,7 +56,6 @@ public class OrderService {
                 order.setSellerId(sellerId);
             }
 
-            // Note: Inline stock deduction (Will be fixed properly in the Concurrency Phase with Optimistic Locking)
             variant.setStock(variant.getStock() - itemDto.getQuantity());
             productVariantRepository.save(variant);
 
@@ -64,7 +64,7 @@ public class OrderService {
 
             OrderItem orderItem = OrderItem.builder()
                     .order(order)
-                    .product(variant.getProduct())
+                    .productVariant(variant) // 🟢 FIX: Saving Variant directly
                     .quantity(itemDto.getQuantity())
                     .price(variant.getSellingPrice())
                     .build();
@@ -74,37 +74,43 @@ public class OrderService {
 
         order.setTotalAmount(totalAmount);
         Order savedOrder = orderRepository.save(order);
+        return mapToResponseDto(savedOrder);
+    }
 
+    // 🟢 NAYA METHOD: Seller dwara order accept/confirm karne ke liye
+    @Transactional
+    public OrderResponseDto updateOrderStatus(Long orderId, String newStatus) {
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new BusinessValidationException("Order not found"));
+        order.setStatus(newStatus);
+        Order savedOrder = orderRepository.save(order);
         return mapToResponseDto(savedOrder);
     }
 
     public List<OrderResponseDto> getAllOrders() {
-        return orderRepository.findAll().stream()
-                .map(this::mapToResponseDto)
-                .collect(Collectors.toList());
+        return orderRepository.findAll().stream().map(this::mapToResponseDto).collect(Collectors.toList());
     }
 
-    // 🟢 SECURITY FIX: Secure method to get ONLY the logged-in customer's orders
     public List<OrderResponseDto> getMyOrders(String userEmail) {
         Customer customer = customerRepository.findByEmail(userEmail)
-                .orElseThrow(() -> new RuntimeException("Customer profile not found for email: " + userEmail));
-
+                .orElseThrow(() -> new BusinessValidationException("Customer profile not found"));
         return orderRepository.findByCustomerId(customer.getId()).stream()
-                .map(this::mapToResponseDto)
-                .collect(Collectors.toList());
+                .map(this::mapToResponseDto).collect(Collectors.toList());
     }
 
     public List<OrderResponseDto> getOrdersBySellerId(Long sellerId) {
         return orderRepository.findBySellerId(sellerId).stream()
-                .map(this::mapToResponseDto)
-                .collect(Collectors.toList());
+                .map(this::mapToResponseDto).collect(Collectors.toList());
     }
 
     private OrderResponseDto mapToResponseDto(Order order) {
         List<OrderResponseDto.OrderItemResponseDto> itemDtos = order.getOrderItems().stream()
                 .map(item -> OrderResponseDto.OrderItemResponseDto.builder()
-                        .productId(item.getProduct().getId())
-                        .productName(item.getProduct().getName())
+                        .productId(item.getProductVariant().getProduct().getId())
+                        .productName(item.getProductVariant().getProduct().getName())
+                        .variantId(item.getProductVariant().getId())
+                        .size(item.getProductVariant().getSize())
+                        .color(item.getProductVariant().getColor())
                         .quantity(item.getQuantity())
                         .price(item.getPrice())
                         .build())
@@ -114,6 +120,9 @@ public class OrderService {
                 .id(order.getId())
                 .customerId(order.getCustomer().getId())
                 .customerName(order.getCustomer().getName())
+                .customerMobile(order.getCustomer().getMobile()) // 🟢 ADDED
+                .status(order.getStatus()) // 🟢 ADDED
+                .deliveryAddress(order.getDeliveryAddress()) // 🟢 ADDED
                 .totalAmount(order.getTotalAmount())
                 .orderDate(order.getOrderDate())
                 .items(itemDtos)
