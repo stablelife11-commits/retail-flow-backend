@@ -9,7 +9,11 @@ import java.time.LocalDate;
 import java.util.List;
 
 @Entity
-@Table(name = "sales")
+@Table(name = "sales", uniqueConstraints = {
+        @UniqueConstraint(columnNames = {"seller_id", "sale_number"})
+}, indexes = {
+        @Index(name = "idx_sales_seller_id", columnList = "seller_id")
+})
 @Getter
 @Setter
 @NoArgsConstructor
@@ -21,8 +25,11 @@ public class Sale {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false, unique = true)
-    private String saleNumber; // e.g., SAL-000001
+    @Column(name = "seller_id", nullable = false)
+    private Long sellerId;
+
+    @Column(name = "sale_number", nullable = false)
+    private String saleNumber;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "customer_id", nullable = false)
@@ -31,7 +38,7 @@ public class Sale {
     @Column(nullable = false)
     private LocalDate saleDate;
 
-    @Column(nullable = false)
+    @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal totalAmount;
 
     @OneToMany(mappedBy = "sale", cascade = CascadeType.ALL, orphanRemoval = true)

@@ -7,6 +7,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -19,14 +20,16 @@ public class ExpenseController {
     private final ExpenseService expenseService;
 
     @PostMapping
-    public ResponseEntity<ExpenseResponseDto> createExpense(@Valid @RequestBody ExpenseRequestDto requestDto) {
-        ExpenseResponseDto response = expenseService.createExpense(requestDto);
+    public ResponseEntity<ExpenseResponseDto> createExpense(
+            @Valid @RequestBody ExpenseRequestDto requestDto,
+            Authentication authentication) {
+        ExpenseResponseDto response = expenseService.createExpense(requestDto, authentication.getName());
         return new ResponseEntity<>(response, HttpStatus.CREATED);
     }
 
     @GetMapping
-    public ResponseEntity<List<ExpenseResponseDto>> getAllExpenses() {
-        List<ExpenseResponseDto> expenses = expenseService.getAllExpenses();
+    public ResponseEntity<List<ExpenseResponseDto>> getAllExpenses(Authentication authentication) {
+        List<ExpenseResponseDto> expenses = expenseService.getAllExpenses(authentication.getName());
         return ResponseEntity.ok(expenses);
     }
 }

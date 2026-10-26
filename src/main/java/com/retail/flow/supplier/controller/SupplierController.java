@@ -7,6 +7,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -19,14 +20,16 @@ public class SupplierController {
     private final SupplierService supplierService;
 
     @PostMapping
-    public ResponseEntity<SupplierResponseDto> createSupplier(@Valid @RequestBody SupplierRequestDto requestDto) {
-        SupplierResponseDto response = supplierService.createSupplier(requestDto);
+    public ResponseEntity<SupplierResponseDto> createSupplier(
+            @Valid @RequestBody SupplierRequestDto requestDto,
+            Authentication authentication) {
+        SupplierResponseDto response = supplierService.createSupplier(requestDto, authentication.getName());
         return new ResponseEntity<>(response, HttpStatus.CREATED);
     }
 
     @GetMapping
-    public ResponseEntity<List<SupplierResponseDto>> getAllSuppliers() {
-        List<SupplierResponseDto> suppliers = supplierService.getAllSuppliers();
+    public ResponseEntity<List<SupplierResponseDto>> getAllSuppliers(Authentication authentication) {
+        List<SupplierResponseDto> suppliers = supplierService.getAllSuppliers(authentication.getName());
         return ResponseEntity.ok(suppliers);
     }
 }

@@ -1,5 +1,6 @@
 package com.retail.flow.product.dto;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Builder;
 import lombok.Data;
 
@@ -28,7 +29,11 @@ public class ProductResponseDto {
         private String size;
         private String color;
         private BigDecimal sellingPrice;
+
+        // Excluded from JSON when null (hidden from buyers and non-owning sellers)
+        @JsonInclude(JsonInclude.Include.NON_NULL)
         private BigDecimal purchasePrice;
+
         private Integer stock;
     }
 }

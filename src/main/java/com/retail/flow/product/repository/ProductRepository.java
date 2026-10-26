@@ -14,8 +14,8 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
 
     Optional<Product> findBySellerIdAndProductCode(Long sellerId, String productCode);
 
-    // 🟢 FIX: Added Pageable for Pagination.
-    // Note: @EntityGraph removed here to prevent Hibernate from doing dangerous "in-memory pagination".
+    long countBySellerId(Long sellerId);
+
     Page<Product> findAll(Pageable pageable);
 
     @Override

@@ -34,5 +34,14 @@ bin/
 *.iml
 .ai/
 
+# Maven build output
+
+target/
+
+# Generated full-code export for AI review
+
+PROJECT_COMPLETE_CODE.txt
+
+
  
  

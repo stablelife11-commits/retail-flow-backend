@@ -4,7 +4,11 @@ import jakarta.persistence.*;
 import lombok.*;
 
 @Entity
-@Table(name = "suppliers")
+@Table(name = "suppliers", uniqueConstraints = {
+        @UniqueConstraint(columnNames = {"seller_id", "phone"})
+}, indexes = {
+        @Index(name = "idx_suppliers_seller_id", columnList = "seller_id")
+})
 @Getter
 @Setter
 @NoArgsConstructor
@@ -16,12 +20,15 @@ public class Supplier {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Column(name = "seller_id", nullable = false)
+    private Long sellerId;
+
     @Column(nullable = false)
     private String name;
 
     private String contactPerson;
 
-    @Column(nullable = false, unique = true)
+    @Column(nullable = false)
     private String phone;
 
     private String email;

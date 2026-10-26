@@ -7,6 +7,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -17,8 +18,10 @@ public class ReturnController {
     private final ReturnService returnService;
 
     @PostMapping
-    public ResponseEntity<ReturnResponseDto> processReturn(@Valid @RequestBody ReturnRequestDto requestDto) {
-        ReturnResponseDto response = returnService.processReturn(requestDto);
+    public ResponseEntity<ReturnResponseDto> processReturn(
+            @Valid @RequestBody ReturnRequestDto requestDto,
+            Authentication authentication) {
+        ReturnResponseDto response = returnService.processReturn(requestDto, authentication.getName());
         return new ResponseEntity<>(response, HttpStatus.CREATED);
     }
 }

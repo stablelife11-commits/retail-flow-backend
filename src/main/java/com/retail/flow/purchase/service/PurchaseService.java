@@ -1,5 +1,6 @@
 package com.retail.flow.purchase.service;
 
+import com.retail.flow.common.exception.ResourceNotFoundException;
 import com.retail.flow.inventory.entity.InventoryTransaction;
 import com.retail.flow.inventory.repository.InventoryTransactionRepository;
 import com.retail.flow.product.entity.ProductVariant;
@@ -11,7 +12,10 @@ import com.retail.flow.purchase.entity.PurchaseItem;
 import com.retail.flow.purchase.repository.PurchaseRepository;
 import com.retail.flow.supplier.entity.Supplier;
 import com.retail.flow.supplier.repository.SupplierRepository;
+import com.retail.flow.user.entity.User;
+import com.retail.flow.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,13 +32,23 @@ public class PurchaseService {
     private final SupplierRepository supplierRepository;
     private final ProductVariantRepository productVariantRepository;
     private final InventoryTransactionRepository inventoryTransactionRepository;
+    private final UserRepository userRepository;
 
     @Transactional
-    public PurchaseResponseDto createPurchase(PurchaseRequestDto requestDto) {
+    public PurchaseResponseDto createPurchase(PurchaseRequestDto requestDto, String callerEmail) {
+        User caller = getUserByEmail(callerEmail);
+
         Supplier supplier = supplierRepository.findById(requestDto.getSupplierId())
-                .orElseThrow(() -> new RuntimeException("Supplier not found with id: " + requestDto.getSupplierId()));
+                .orElseThrow(() -> new ResourceNotFoundException("Supplier not found with id: " + requestDto.getSupplierId()));
+
+        if (caller.getRole() != User.Role.ADMIN && !supplier.getSellerId().equals(caller.getId())) {
+            throw new AccessDeniedException("You cannot record a purchase using another seller's supplier.");
+        }
+
+        Long authoritativeSellerId = supplier.getSellerId();
 
         Purchase purchase = Purchase.builder()
+                .sellerId(authoritativeSellerId)
                 .purchaseNumber(requestDto.getPurchaseNumber())
                 .supplier(supplier)
                 .purchaseDate(requestDto.getPurchaseDate())
@@ -43,16 +57,21 @@ public class PurchaseService {
                 .build();
 
         BigDecimal totalAmount = BigDecimal.ZERO;
+        List<InventoryTransaction> pendingTransactions = new ArrayList<>();
 
         for (var itemDto : requestDto.getItems()) {
             ProductVariant variant = productVariantRepository.findById(itemDto.getVariantId())
-                    .orElseThrow(() -> new RuntimeException("Product variant not found with id: " + itemDto.getVariantId()));
+                    .orElseThrow(() -> new ResourceNotFoundException("Product variant not found with id: " + itemDto.getVariantId()));
+
+            if (!variant.getProduct().getSellerId().equals(authoritativeSellerId)) {
+                throw new AccessDeniedException("Variant SKU " + variant.getSku() + " does not belong to your seller catalog.");
+            }
 
             int previousStock = variant.getStock();
             int newStock = previousStock + itemDto.getQuantity();
 
-            // Update variant stock
             variant.setStock(newStock);
+            variant.setPurchasePrice(itemDto.getUnitCost());
             productVariantRepository.save(variant);
 
             BigDecimal itemTotal = itemDto.getUnitCost().multiply(BigDecimal.valueOf(itemDto.getQuantity()));
@@ -68,30 +87,42 @@ public class PurchaseService {
 
             purchase.getPurchaseItems().add(purchaseItem);
 
-            // Create Inventory Audit Trail Transaction
-            InventoryTransaction transaction = InventoryTransaction.builder()
+            pendingTransactions.add(InventoryTransaction.builder()
                     .productVariant(variant)
                     .type(InventoryTransaction.TransactionType.PURCHASE)
                     .quantity(itemDto.getQuantity())
                     .referenceType("PURCHASE")
-                    .referenceId(null) // Will be updated or saved after purchase ID generation
                     .previousStock(previousStock)
                     .newStock(newStock)
-                    .build();
-
-            inventoryTransactionRepository.save(transaction);
+                    .build());
         }
 
         purchase.setTotalAmount(totalAmount);
         Purchase savedPurchase = purchaseRepository.save(purchase);
 
+        for (InventoryTransaction tx : pendingTransactions) {
+            tx.setReferenceId(savedPurchase.getId());
+        }
+        inventoryTransactionRepository.saveAll(pendingTransactions);
+
         return mapToResponseDto(savedPurchase);
     }
 
-    public List<PurchaseResponseDto> getAllPurchases() {
-        return purchaseRepository.findAll().stream()
+    @Transactional(readOnly = true)
+    public List<PurchaseResponseDto> getAllPurchases(String callerEmail) {
+        User caller = getUserByEmail(callerEmail);
+        List<Purchase> purchases = (caller.getRole() == User.Role.ADMIN)
+                ? purchaseRepository.findAll()
+                : purchaseRepository.findBySellerId(caller.getId());
+
+        return purchases.stream()
                 .map(this::mapToResponseDto)
                 .collect(Collectors.toList());
+    }
+
+    private User getUserByEmail(String email) {
+        return userRepository.findByEmail(email)
+                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
     }
 
     private PurchaseResponseDto mapToResponseDto(Purchase purchase) {

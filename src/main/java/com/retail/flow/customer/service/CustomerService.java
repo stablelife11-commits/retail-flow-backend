@@ -1,11 +1,17 @@
 package com.retail.flow.customer.service;
 
+import com.retail.flow.common.exception.BusinessValidationException;
+import com.retail.flow.common.exception.ResourceNotFoundException;
 import com.retail.flow.customer.dto.CustomerRequestDto;
 import com.retail.flow.customer.dto.CustomerResponseDto;
 import com.retail.flow.customer.entity.Customer;
 import com.retail.flow.customer.repository.CustomerRepository;
+import com.retail.flow.user.entity.User;
+import com.retail.flow.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import java.util.List;
 import java.util.stream.Collectors;
@@ -15,16 +21,29 @@ import java.util.stream.Collectors;
 public class CustomerService {
 
     private final CustomerRepository customerRepository;
+    private final UserRepository userRepository;
 
-    public CustomerResponseDto createCustomer(CustomerRequestDto requestDto) {
-        if (customerRepository.existsByMobile(requestDto.getMobile())) {
-            throw new RuntimeException("Customer with this mobile number already exists.");
+    @Transactional
+    public CustomerResponseDto createCustomer(CustomerRequestDto requestDto, String callerEmail) {
+        User caller = getUserByEmail(callerEmail);
+        String trimmedMobile = requestDto.getMobile().trim();
+        String normalizedEmail = StringUtils.hasText(requestDto.getEmail())
+                ? requestDto.getEmail().trim().toLowerCase()
+                : null;
+
+        if (customerRepository.existsByMobile(trimmedMobile)) {
+            throw new BusinessValidationException("Customer with this mobile number already exists.");
+        }
+
+        if (normalizedEmail != null && customerRepository.existsByEmail(normalizedEmail)) {
+            throw new BusinessValidationException("Customer with this email already exists.");
         }
 
         Customer customer = Customer.builder()
-                .name(requestDto.getName())
-                .mobile(requestDto.getMobile())
-                .email(requestDto.getEmail())
+                .sellerId(caller.getId())
+                .name(requestDto.getName().trim())
+                .mobile(trimmedMobile)
+                .email(normalizedEmail)
                 .active(true)
                 .build();
 
@@ -32,10 +51,22 @@ public class CustomerService {
         return mapToResponseDto(savedCustomer);
     }
 
-    public List<CustomerResponseDto> getAllCustomers() {
-        return customerRepository.findAll().stream()
+    @Transactional(readOnly = true)
+    public List<CustomerResponseDto> getAllCustomers(String callerEmail) {
+        User caller = getUserByEmail(callerEmail);
+
+        List<Customer> customers = (caller.getRole() == User.Role.ADMIN)
+                ? customerRepository.findAll()
+                : customerRepository.findCustomersForSeller(caller.getId());
+
+        return customers.stream()
                 .map(this::mapToResponseDto)
                 .collect(Collectors.toList());
+    }
+
+    private User getUserByEmail(String email) {
+        return userRepository.findByEmail(email)
+                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
     }
 
     private CustomerResponseDto mapToResponseDto(Customer customer) {

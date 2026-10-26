@@ -1,5 +1,7 @@
 package com.retail.flow.product.service;
 
+import com.retail.flow.common.exception.BusinessValidationException;
+import com.retail.flow.common.exception.ResourceNotFoundException;
 import com.retail.flow.product.dto.ProductRequestDto;
 import com.retail.flow.product.dto.ProductResponseDto;
 import com.retail.flow.product.dto.StockUpdateRequestDto;
@@ -8,10 +10,13 @@ import com.retail.flow.product.entity.ProductImage;
 import com.retail.flow.product.entity.ProductVariant;
 import com.retail.flow.product.repository.ProductRepository;
 import com.retail.flow.product.repository.ProductVariantRepository;
+import com.retail.flow.user.entity.User;
+import com.retail.flow.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
-import org.springframework.data.domain.PageRequest; // 🟢 NAYA
-import org.springframework.data.domain.Pageable; // 🟢 NAYA
-import org.springframework.data.domain.Sort; // 🟢 NAYA
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -24,16 +29,24 @@ public class ProductService {
 
     private final ProductRepository productRepository;
     private final ProductVariantRepository variantRepository;
+    private final UserRepository userRepository;
 
     @Transactional
-    public ProductResponseDto createProduct(ProductRequestDto requestDto) {
-        productRepository.findBySellerIdAndProductCode(requestDto.getSellerId(), requestDto.getProductCode())
+    public ProductResponseDto createProduct(ProductRequestDto requestDto, String callerEmail) {
+        User caller = getUserByEmail(callerEmail);
+
+        // Enforce seller ownership: A SELLER can only create products for their own User ID
+        Long authoritativeSellerId = (caller.getRole() == User.Role.ADMIN && requestDto.getSellerId() != null)
+                ? requestDto.getSellerId()
+                : caller.getId();
+
+        productRepository.findBySellerIdAndProductCode(authoritativeSellerId, requestDto.getProductCode())
                 .ifPresent(p -> {
-                    throw new RuntimeException("Product code already exists for this seller.");
+                    throw new BusinessValidationException("Product code already exists for this seller.");
                 });
 
         Product product = Product.builder()
-                .sellerId(requestDto.getSellerId())
+                .sellerId(authoritativeSellerId)
                 .productCode(requestDto.getProductCode())
                 .name(requestDto.getName())
                 .description(requestDto.getDescription())
@@ -69,27 +82,37 @@ public class ProductService {
         }
 
         Product savedProduct = productRepository.save(product);
-        return mapToResponseDto(savedProduct);
+        return mapToResponseDto(savedProduct, caller);
     }
 
-    // 🟢 FIX: Backend now handles exact Pages & Sizes (Sorted by newest first)
-    public List<ProductResponseDto> getAllProducts(int page, int size) {
+    @Transactional(readOnly = true)
+    public List<ProductResponseDto> getAllProducts(int page, int size, String callerEmail) {
+        User caller = getUserByEmail(callerEmail);
         Pageable pageable = PageRequest.of(page, size, Sort.by("id").descending());
         return productRepository.findAll(pageable).stream()
-                .map(this::mapToResponseDto)
+                .map(product -> mapToResponseDto(product, caller))
                 .collect(Collectors.toList());
     }
 
-    public ProductResponseDto getProductById(Long id) {
+    @Transactional(readOnly = true)
+    public ProductResponseDto getProductById(Long id, String callerEmail) {
+        User caller = getUserByEmail(callerEmail);
         Product product = productRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Product not found with id: " + id));
-        return mapToResponseDto(product);
+                .orElseThrow(() -> new ResourceNotFoundException("Product not found with id: " + id));
+        return mapToResponseDto(product, caller);
     }
 
     @Transactional
-    public ProductResponseDto.VariantResponseDto updateVariantStock(Long variantId, StockUpdateRequestDto requestDto) {
+    public ProductResponseDto.VariantResponseDto updateVariantStock(
+            Long variantId, StockUpdateRequestDto requestDto, String callerEmail) {
+        User caller = getUserByEmail(callerEmail);
         ProductVariant variant = variantRepository.findById(variantId)
-                .orElseThrow(() -> new RuntimeException("Variant not found with id: " + variantId));
+                .orElseThrow(() -> new ResourceNotFoundException("Variant not found with id: " + variantId));
+
+        // BOLA Check: Only the owning Seller or an Admin can update this variant's stock
+        if (caller.getRole() != User.Role.ADMIN && !variant.getProduct().getSellerId().equals(caller.getId())) {
+            throw new AccessDeniedException("You are not authorized to modify inventory for another seller's product.");
+        }
 
         variant.setStock(requestDto.getStock());
         ProductVariant savedVariant = variantRepository.save(variant);
@@ -105,7 +128,15 @@ public class ProductService {
                 .build();
     }
 
-    private ProductResponseDto mapToResponseDto(Product product) {
+    private User getUserByEmail(String email) {
+        return userRepository.findByEmail(email)
+                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
+    }
+
+    private ProductResponseDto mapToResponseDto(Product product, User caller) {
+        boolean canViewPurchasePrice = caller.getRole() == User.Role.ADMIN
+                || (caller.getRole() == User.Role.SELLER && product.getSellerId().equals(caller.getId()));
+
         List<ProductResponseDto.VariantResponseDto> variantDtos = product.getVariants() == null ? List.of() :
                 product.getVariants().stream()
                         .map(v -> ProductResponseDto.VariantResponseDto.builder()
@@ -114,7 +145,7 @@ public class ProductService {
                                 .size(v.getSize())
                                 .color(v.getColor())
                                 .sellingPrice(v.getSellingPrice())
-                                .purchasePrice(v.getPurchasePrice())
+                                .purchasePrice(canViewPurchasePrice ? v.getPurchasePrice() : null)
                                 .stock(v.getStock())
                                 .build())
                         .collect(Collectors.toList());

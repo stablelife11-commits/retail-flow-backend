@@ -7,6 +7,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -19,14 +20,16 @@ public class SaleController {
     private final SaleService saleService;
 
     @PostMapping
-    public ResponseEntity<SaleResponseDto> createSale(@Valid @RequestBody SaleRequestDto requestDto) {
-        SaleResponseDto response = saleService.createSale(requestDto);
+    public ResponseEntity<SaleResponseDto> createSale(
+            @Valid @RequestBody SaleRequestDto requestDto,
+            Authentication authentication) {
+        SaleResponseDto response = saleService.createSale(requestDto, authentication.getName());
         return new ResponseEntity<>(response, HttpStatus.CREATED);
     }
 
     @GetMapping
-    public ResponseEntity<List<SaleResponseDto>> getAllSales() {
-        List<SaleResponseDto> sales = saleService.getAllSales();
+    public ResponseEntity<List<SaleResponseDto>> getAllSales(Authentication authentication) {
+        List<SaleResponseDto> sales = saleService.getAllSales(authentication.getName());
         return ResponseEntity.ok(sales);
     }
 }

@@ -6,7 +6,10 @@ import java.time.LocalDate;
 import java.util.List;
 
 @Entity
-@Table(name = "sale_returns")
+@Table(name = "sale_returns", indexes = {
+        @Index(name = "idx_sale_returns_sale_id", columnList = "sale_id"),
+        @Index(name = "idx_sale_returns_seller_id", columnList = "seller_id")
+})
 @Getter
 @Setter
 @Builder
@@ -17,7 +20,12 @@ public class SaleReturn {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Column(name = "seller_id", nullable = false)
+    private Long sellerId;
+
+    @Column(name = "sale_id", nullable = false)
     private Long saleId;
+
     private LocalDate returnDate;
     private String reason;
 

@@ -2,6 +2,7 @@ package com.retail.flow.auth.dto;
 
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 
@@ -18,6 +19,7 @@ public class RegisterRequestDto {
     @Size(min = 6, message = "Password must be at least 6 characters")
     private String password;
 
-    // Note: Role is intentionally restricted during public registration to prevent unauthorized ADMIN creation[cite: 1].
-    private String role; // Can be SELLER or BUYER only
+    @NotBlank(message = "Mobile number is required")
+    @Pattern(regexp = "^\\d{10}$", message = "Mobile number must be exactly 10 digits")
+    private String mobile;
 }

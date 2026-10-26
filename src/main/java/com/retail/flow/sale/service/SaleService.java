@@ -1,5 +1,7 @@
 package com.retail.flow.sale.service;
 
+import com.retail.flow.common.exception.BusinessValidationException;
+import com.retail.flow.common.exception.ResourceNotFoundException;
 import com.retail.flow.customer.entity.Customer;
 import com.retail.flow.customer.repository.CustomerRepository;
 import com.retail.flow.inventory.entity.InventoryTransaction;
@@ -11,7 +13,10 @@ import com.retail.flow.sale.dto.SaleResponseDto;
 import com.retail.flow.sale.entity.Sale;
 import com.retail.flow.sale.entity.SaleItem;
 import com.retail.flow.sale.repository.SaleRepository;
+import com.retail.flow.user.entity.User;
+import com.retail.flow.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,13 +33,17 @@ public class SaleService {
     private final CustomerRepository customerRepository;
     private final ProductVariantRepository productVariantRepository;
     private final InventoryTransactionRepository inventoryTransactionRepository;
+    private final UserRepository userRepository;
 
     @Transactional
-    public SaleResponseDto createSale(SaleRequestDto requestDto) {
+    public SaleResponseDto createSale(SaleRequestDto requestDto, String callerEmail) {
+        User caller = getUserByEmail(callerEmail);
+
         Customer customer = customerRepository.findById(requestDto.getCustomerId())
-                .orElseThrow(() -> new RuntimeException("Customer not found with id: " + requestDto.getCustomerId()));
+                .orElseThrow(() -> new ResourceNotFoundException("Customer not found with id: " + requestDto.getCustomerId()));
 
         Sale sale = Sale.builder()
+                .sellerId(caller.getId())
                 .saleNumber(requestDto.getSaleNumber())
                 .customer(customer)
                 .saleDate(requestDto.getSaleDate())
@@ -43,19 +52,23 @@ public class SaleService {
                 .build();
 
         BigDecimal totalAmount = BigDecimal.ZERO;
+        List<InventoryTransaction> pendingTransactions = new ArrayList<>();
 
         for (var itemDto : requestDto.getItems()) {
             ProductVariant variant = productVariantRepository.findById(itemDto.getVariantId())
-                    .orElseThrow(() -> new RuntimeException("Product variant not found with id: " + itemDto.getVariantId()));
+                    .orElseThrow(() -> new ResourceNotFoundException("Product variant not found with id: " + itemDto.getVariantId()));
+
+            if (caller.getRole() != User.Role.ADMIN && !variant.getProduct().getSellerId().equals(caller.getId())) {
+                throw new AccessDeniedException("You cannot sell another seller's product variant (SKU: " + variant.getSku() + ").");
+            }
 
             if (variant.getStock() < itemDto.getQuantity()) {
-                throw new RuntimeException("Insufficient stock for SKU: " + variant.getSku());
+                throw new BusinessValidationException("Insufficient stock for SKU: " + variant.getSku());
             }
 
             int previousStock = variant.getStock();
             int newStock = previousStock - itemDto.getQuantity();
 
-            // Update variant stock
             variant.setStock(newStock);
             productVariantRepository.save(variant);
 
@@ -73,30 +86,42 @@ public class SaleService {
 
             sale.getSaleItems().add(saleItem);
 
-            // Record Inventory Transaction
-            InventoryTransaction transaction = InventoryTransaction.builder()
+            pendingTransactions.add(InventoryTransaction.builder()
                     .productVariant(variant)
                     .type(InventoryTransaction.TransactionType.SALE)
                     .quantity(itemDto.getQuantity())
                     .referenceType("SALE")
-                    .referenceId(null)
                     .previousStock(previousStock)
                     .newStock(newStock)
-                    .build();
-
-            inventoryTransactionRepository.save(transaction);
+                    .build());
         }
 
         sale.setTotalAmount(totalAmount);
         Sale savedSale = saleRepository.save(sale);
 
+        for (InventoryTransaction tx : pendingTransactions) {
+            tx.setReferenceId(savedSale.getId());
+        }
+        inventoryTransactionRepository.saveAll(pendingTransactions);
+
         return mapToResponseDto(savedSale);
     }
 
-    public List<SaleResponseDto> getAllSales() {
-        return saleRepository.findAll().stream()
+    @Transactional(readOnly = true)
+    public List<SaleResponseDto> getAllSales(String callerEmail) {
+        User caller = getUserByEmail(callerEmail);
+        List<Sale> sales = (caller.getRole() == User.Role.ADMIN)
+                ? saleRepository.findAll()
+                : saleRepository.findBySellerId(caller.getId());
+
+        return sales.stream()
                 .map(this::mapToResponseDto)
                 .collect(Collectors.toList());
+    }
+
+    private User getUserByEmail(String email) {
+        return userRepository.findByEmail(email)
+                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
     }
 
     private SaleResponseDto mapToResponseDto(Sale sale) {

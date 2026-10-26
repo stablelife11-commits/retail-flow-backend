@@ -4,7 +4,9 @@ import jakarta.persistence.*;
 import lombok.*;
 
 @Entity
-@Table(name = "customers")
+@Table(name = "customers", indexes = {
+        @Index(name = "idx_customers_seller_id", columnList = "seller_id")
+})
 @Getter
 @Setter
 @NoArgsConstructor
@@ -15,6 +17,10 @@ public class Customer {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    // Nullable for self-registered platform Buyers; set to seller's User ID when created by a Seller
+    @Column(name = "seller_id")
+    private Long sellerId;
 
     @Column(nullable = false)
     private String name;

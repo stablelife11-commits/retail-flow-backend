@@ -4,6 +4,7 @@ import com.retail.flow.report.dto.DashboardSummaryDto;
 import com.retail.flow.report.service.ReportService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -16,8 +17,8 @@ public class ReportController {
     private final ReportService reportService;
 
     @GetMapping("/dashboard-summary")
-    public ResponseEntity<DashboardSummaryDto> getDashboardSummary() {
-        DashboardSummaryDto summary = reportService.getDashboardSummary();
+    public ResponseEntity<DashboardSummaryDto> getDashboardSummary(Authentication authentication) {
+        DashboardSummaryDto summary = reportService.getDashboardSummary(authentication.getName());
         return ResponseEntity.ok(summary);
     }
 }

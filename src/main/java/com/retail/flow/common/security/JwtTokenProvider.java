@@ -24,12 +24,13 @@ public class JwtTokenProvider {
         return Keys.hmacShaKeyFor(jwtSecret.getBytes(StandardCharsets.UTF_8));
     }
 
-    public String generateToken(String email, String role) {
+    public String generateToken(Long userId, String email, String role) {
         Date now = new Date();
         Date expiryDate = new Date(now.getTime() + jwtExpirationInMs);
 
         return Jwts.builder()
                 .subject(email)
+                .claim("userId", userId)
                 .claim("role", role)
                 .issuedAt(now)
                 .expiration(expiryDate)
@@ -38,27 +39,28 @@ public class JwtTokenProvider {
     }
 
     public String getEmailFromJWT(String token) {
-        Claims claims = Jwts.parser()
-                .verifyWith(getSigningKey())
-                .build()
-                .parseSignedClaims(token)
-                .getPayload();
-        return claims.getSubject();
+        return getClaims(token).getSubject();
     }
 
-    // 🟢 NAYA METHOD: Token se Role nikalne ke liye
     public String getRoleFromJWT(String token) {
-        Claims claims = Jwts.parser()
+        return getClaims(token).get("role", String.class);
+    }
+
+    public Long getUserIdFromJWT(String token) {
+        return getClaims(token).get("userId", Long.class);
+    }
+
+    private Claims getClaims(String token) {
+        return Jwts.parser()
                 .verifyWith(getSigningKey())
                 .build()
                 .parseSignedClaims(token)
                 .getPayload();
-        return claims.get("role", String.class);
     }
 
     public boolean validateToken(String authToken) {
         try {
-            Jwts.parser().verifyWith(getSigningKey()).build().parseSignedClaims(authToken);
+            getClaims(authToken);
             return true;
         } catch (JwtException | IllegalArgumentException ex) {
             return false;

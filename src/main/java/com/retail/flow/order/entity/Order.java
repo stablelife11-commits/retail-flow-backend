@@ -7,9 +7,13 @@ import lombok.*;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Set;
 
 @Entity
-@Table(name = "orders")
+@Table(name = "orders", indexes = {
+        @Index(name = "idx_orders_seller_id", columnList = "seller_id"),
+        @Index(name = "idx_orders_customer_id", columnList = "customer_id")
+})
 @Getter
 @Setter
 @NoArgsConstructor
@@ -31,22 +35,53 @@ public class Order {
     @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<OrderItem> orderItems;
 
-    @Column(nullable = false)
+    @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal totalAmount;
 
     @Column(nullable = false)
     private LocalDateTime orderDate;
 
-    // 🟢 NAYA: Delivery Address (Customer app se aayega)
     private String deliveryAddress;
 
-    // 🟢 NAYA: Order Status Tracker (PLACED, CONFIRMED, SHIPPED, DELIVERED)
-    @Column(nullable = false)
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 30)
     @Builder.Default
-    private String status = "PLACED";
+    private OrderStatus status = OrderStatus.PLACED;
 
     @PrePersist
     public void prePersist() {
-        this.orderDate = LocalDateTime.now();
+        if (this.orderDate == null) {
+            this.orderDate = LocalDateTime.now();
+        }
+        if (this.status == null) {
+            this.status = OrderStatus.PLACED;
+        }
+    }
+
+    public enum OrderStatus {
+        PLACED,
+        CONFIRMED,
+        PROCESSING,
+        SHIPPED,
+        DELIVERED,
+        CANCELLED,
+        REJECTED;
+
+        public boolean canTransitionTo(OrderStatus target) {
+            if (this == target) {
+                return false;
+            }
+            return switch (this) {
+                case PLACED -> Set.of(CONFIRMED, PROCESSING, REJECTED, CANCELLED).contains(target);
+                case CONFIRMED -> Set.of(PROCESSING, SHIPPED, CANCELLED).contains(target);
+                case PROCESSING -> Set.of(SHIPPED, CANCELLED).contains(target);
+                case SHIPPED -> Set.of(DELIVERED).contains(target);
+                case DELIVERED, CANCELLED, REJECTED -> false; // Terminal states
+            };
+        }
+
+        public boolean isStockReleaseState() {
+            return this == CANCELLED || this == REJECTED;
+        }
     }
 }
