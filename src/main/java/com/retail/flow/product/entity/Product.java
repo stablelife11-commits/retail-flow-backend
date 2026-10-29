@@ -7,9 +7,16 @@ import org.hibernate.annotations.BatchSize;
 import java.util.List;
 
 @Entity
-@Table(name = "products", uniqueConstraints = {
-        @UniqueConstraint(columnNames = {"seller_id", "product_code"})
-})
+@Table(name = "products",
+        uniqueConstraints = {
+                @UniqueConstraint(columnNames = {"seller_id", "product_code"})
+        },
+        indexes = {
+                @Index(name = "idx_products_seller_id", columnList = "seller_id"),
+                @Index(name = "idx_products_category", columnList = "category"),
+                @Index(name = "idx_products_brand", columnList = "brand"),
+                @Index(name = "idx_products_active", columnList = "active")
+        })
 @Getter
 @Setter
 @NoArgsConstructor
@@ -37,6 +44,7 @@ public class Product {
     private String brand;
 
     @Column(nullable = false)
+    @Builder.Default
     private Boolean active = true;
 
     @OneToMany(mappedBy = "product", cascade = CascadeType.ALL, orphanRemoval = true)

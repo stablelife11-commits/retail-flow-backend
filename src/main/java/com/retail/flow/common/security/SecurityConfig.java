@@ -22,6 +22,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
+    private final AuthRateLimitingFilter authRateLimitingFilter;
 
     @Bean
     public PasswordEncoder passwordEncoder() {
@@ -50,16 +51,22 @@ public class SecurityConfig {
                 )
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/v1/auth/**").permitAll()
+                        .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
+                        .requestMatchers("/actuator/**").hasRole("ADMIN")
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
 
                         // Admin User & Seller Management
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
 
-                        // Product Catalog
+                        // Product Catalog Management
+                        .requestMatchers(HttpMethod.GET, "/api/v1/products/my-products").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers(HttpMethod.POST, "/api/v1/products/**").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers(HttpMethod.PUT, "/api/v1/products/**").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers(HttpMethod.PATCH, "/api/v1/products/**").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers(HttpMethod.DELETE, "/api/v1/products/**").hasAnyRole("SELLER", "ADMIN")
+
+                        // Persistent Buyer Cart
+                        .requestMatchers("/api/v1/cart/**").hasAnyRole("BUYER", "ADMIN")
 
                         // Order Endpoints
                         .requestMatchers(HttpMethod.GET, "/api/v1/orders/my-orders").hasAnyRole("BUYER", "ADMIN")
@@ -81,6 +88,7 @@ public class SecurityConfig {
                         .anyRequest().authenticated()
                 );
 
+        http.addFilterBefore(authRateLimitingFilter, UsernamePasswordAuthenticationFilter.class);
         http.addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();

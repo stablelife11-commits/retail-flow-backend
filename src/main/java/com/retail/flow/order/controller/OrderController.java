@@ -27,7 +27,6 @@ public class OrderController {
         return new ResponseEntity<>(response, HttpStatus.CREATED);
     }
 
-    // Multi-seller cart checkout: Automatically splits items by sellerId into separate orders
     @PostMapping("/checkout")
     public ResponseEntity<List<OrderResponseDto>> createMultiSellerOrders(
             @Valid @RequestBody OrderRequestDto requestDto,
@@ -37,22 +36,29 @@ public class OrderController {
     }
 
     @GetMapping
-    public ResponseEntity<List<OrderResponseDto>> getAllOrders() {
-        List<OrderResponseDto> orders = orderService.getAllOrders();
+    public ResponseEntity<List<OrderResponseDto>> getAllOrders(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "50") int size) {
+        List<OrderResponseDto> orders = orderService.getAllOrders(page, size);
         return ResponseEntity.ok(orders);
     }
 
     @GetMapping("/my-orders")
-    public ResponseEntity<List<OrderResponseDto>> getMyOrders(Authentication authentication) {
-        List<OrderResponseDto> orders = orderService.getMyOrders(authentication.getName());
+    public ResponseEntity<List<OrderResponseDto>> getMyOrders(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "50") int size,
+            Authentication authentication) {
+        List<OrderResponseDto> orders = orderService.getMyOrders(authentication.getName(), page, size);
         return ResponseEntity.ok(orders);
     }
 
     @GetMapping("/seller/{sellerId}")
     public ResponseEntity<List<OrderResponseDto>> getOrdersBySellerId(
             @PathVariable Long sellerId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "50") int size,
             Authentication authentication) {
-        List<OrderResponseDto> orders = orderService.getOrdersBySellerId(sellerId, authentication.getName());
+        List<OrderResponseDto> orders = orderService.getOrdersBySellerId(sellerId, authentication.getName(), page, size);
         return ResponseEntity.ok(orders);
     }
 

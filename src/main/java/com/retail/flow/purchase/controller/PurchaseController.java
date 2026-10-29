@@ -28,8 +28,11 @@ public class PurchaseController {
     }
 
     @GetMapping
-    public ResponseEntity<List<PurchaseResponseDto>> getAllPurchases(Authentication authentication) {
-        List<PurchaseResponseDto> purchases = purchaseService.getAllPurchases(authentication.getName());
+    public ResponseEntity<List<PurchaseResponseDto>> getAllPurchases(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "50") int size,
+            Authentication authentication) {
+        List<PurchaseResponseDto> purchases = purchaseService.getAllPurchases(authentication.getName(), page, size);
         return ResponseEntity.ok(purchases);
     }
 }

@@ -33,16 +33,10 @@ public class AuthService {
             throw new BusinessValidationException("Email is already registered!");
         }
 
-        // Check if a Customer record already exists with this mobile but a different email
-        customerRepository.findByMobile(trimmedMobile).ifPresent(existingCustomer -> {
-            if (StringUtils.hasText(existingCustomer.getEmail())
-                    && !existingCustomer.getEmail().equalsIgnoreCase(normalizedEmail)) {
-                throw new BusinessValidationException("Mobile number is already registered to another account!");
-            }
-        });
+        if (customerRepository.existsBySellerIdIsNullAndMobile(trimmedMobile)) {
+            throw new BusinessValidationException("Mobile number is already registered to another buyer account!");
+        }
 
-        // SECURITY FIX (SEC-001): All public registrations default strictly to BUYER.
-        // Only an ADMIN can promote an account to SELLER via /api/v1/admin/users/{id}/role.
         User user = User.builder()
                 .name(requestDto.getName().trim())
                 .email(normalizedEmail)
@@ -53,7 +47,7 @@ public class AuthService {
 
         user = userRepository.save(user);
 
-        Customer customer = getOrCreateCustomerForBuyer(user, trimmedMobile);
+        Customer customer = getOrCreatePlatformBuyerProfile(user, trimmedMobile);
 
         String token = tokenProvider.generateToken(user.getId(), user.getEmail(), user.getRole().name());
 
@@ -84,7 +78,7 @@ public class AuthService {
 
         Long customerId = null;
         if (user.getRole() == User.Role.BUYER) {
-            Customer customer = getOrCreateCustomerForBuyer(user, null);
+            Customer customer = getOrCreatePlatformBuyerProfile(user, null);
             customerId = customer.getId();
         }
 
@@ -100,25 +94,17 @@ public class AuthService {
                 .build();
     }
 
-    private Customer getOrCreateCustomerForBuyer(User user, String providedMobile) {
+    // SECURITY FIX (F-002): Never overwrite or hijack seller-managed offline Customer records.
+    // Always maintain an isolated platform buyer Customer record (sellerId = null).
+    private Customer getOrCreatePlatformBuyerProfile(User user, String providedMobile) {
         return customerRepository.findByEmail(user.getEmail())
                 .orElseGet(() -> {
-                    if (StringUtils.hasText(providedMobile)) {
-                        // Link to an offline customer record if a Seller previously added this buyer's mobile
-                        var byMobile = customerRepository.findByMobile(providedMobile);
-                        if (byMobile.isPresent()) {
-                            Customer existing = byMobile.get();
-                            existing.setEmail(user.getEmail());
-                            existing.setName(user.getName());
-                            return customerRepository.save(existing);
-                        }
-                    }
-
                     String fallbackMobile = StringUtils.hasText(providedMobile)
                             ? providedMobile
                             : String.format("00%08d", user.getId());
 
                     Customer newCust = Customer.builder()
+                            .sellerId(null)
                             .name(user.getName())
                             .email(user.getEmail())
                             .mobile(fallbackMobile)

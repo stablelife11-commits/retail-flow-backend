@@ -8,7 +8,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
@@ -16,7 +15,6 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.util.Collections;
 import java.util.Optional;
 
 @Component
@@ -38,13 +36,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
                 // Block suspended/deactivated users even if their JWT has not expired yet
                 if (userOpt.isPresent() && Boolean.TRUE.equals(userOpt.get().getActive())) {
-                    User user = userOpt.get();
-                    var authorities = Collections.singletonList(
-                            new SimpleGrantedAuthority("ROLE_" + user.getRole().name())
-                    );
+                    AuthenticatedUserPrincipal principal = new AuthenticatedUserPrincipal(userOpt.get());
 
                     UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
-                            email, null, authorities
+                            principal, null, principal.getAuthorities()
                     );
                     authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
 

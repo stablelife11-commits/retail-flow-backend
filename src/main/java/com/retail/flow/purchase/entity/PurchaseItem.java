@@ -7,7 +7,10 @@ import lombok.*;
 import java.math.BigDecimal;
 
 @Entity
-@Table(name = "purchase_items")
+@Table(name = "purchase_items", indexes = {
+        @Index(name = "idx_purchase_items_purchase_id", columnList = "purchase_id"),
+        @Index(name = "idx_purchase_items_variant_id", columnList = "product_variant_id")
+})
 @Getter
 @Setter
 @NoArgsConstructor
@@ -30,9 +33,9 @@ public class PurchaseItem {
     @Column(nullable = false)
     private Integer quantity;
 
-    @Column(nullable = false)
+    @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal unitCost;
 
-    @Column(nullable = false)
+    @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal totalPrice;
 }

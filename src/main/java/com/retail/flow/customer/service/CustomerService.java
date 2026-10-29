@@ -31,12 +31,12 @@ public class CustomerService {
                 ? requestDto.getEmail().trim().toLowerCase()
                 : null;
 
-        if (customerRepository.existsByMobile(trimmedMobile)) {
-            throw new BusinessValidationException("Customer with this mobile number already exists.");
+        if (customerRepository.existsBySellerIdAndMobile(caller.getId(), trimmedMobile)) {
+            throw new BusinessValidationException("A customer with this mobile number already exists in your directory.");
         }
 
-        if (normalizedEmail != null && customerRepository.existsByEmail(normalizedEmail)) {
-            throw new BusinessValidationException("Customer with this email already exists.");
+        if (normalizedEmail != null && customerRepository.existsBySellerIdAndEmail(caller.getId(), normalizedEmail)) {
+            throw new BusinessValidationException("A customer with this email already exists in your directory.");
         }
 
         Customer customer = Customer.builder()

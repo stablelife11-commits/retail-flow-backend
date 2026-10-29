@@ -4,6 +4,10 @@ import com.retail.flow.common.exception.BusinessValidationException;
 import com.retail.flow.common.exception.ResourceNotFoundException;
 import com.retail.flow.inventory.entity.InventoryTransaction;
 import com.retail.flow.inventory.repository.InventoryTransactionRepository;
+import com.retail.flow.order.entity.Order;
+import com.retail.flow.order.entity.Order.OrderStatus;
+import com.retail.flow.order.entity.OrderItem;
+import com.retail.flow.order.repository.OrderRepository;
 import com.retail.flow.product.entity.ProductVariant;
 import com.retail.flow.product.repository.ProductVariantRepository;
 import com.retail.flow.returns.dto.ReturnRequestDto;
@@ -21,6 +25,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -32,6 +37,7 @@ public class ReturnService {
     private final SaleReturnRepository returnRepository;
     private final ProductVariantRepository variantRepository;
     private final SaleRepository saleRepository;
+    private final OrderRepository orderRepository;
     private final InventoryTransactionRepository inventoryTransactionRepository;
     private final UserRepository userRepository;
 
@@ -40,20 +46,58 @@ public class ReturnService {
         User caller = userRepository.findByEmail(callerEmail)
                 .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
 
-        Sale sale = saleRepository.findById(requestDto.getSaleId())
-                .orElseThrow(() -> new ResourceNotFoundException("Sale not found with id: " + requestDto.getSaleId()));
+        boolean hasSaleId = requestDto.getSaleId() != null;
+        boolean hasOrderId = requestDto.getOrderId() != null;
 
-        if (caller.getRole() != User.Role.ADMIN && !sale.getSellerId().equals(caller.getId())) {
-            throw new AccessDeniedException("You are not authorized to process returns for another seller's sale.");
+        if (hasSaleId == hasOrderId) {
+            throw new BusinessValidationException("Provide exactly one of 'saleId' (offline sale) or 'orderId' (delivered online order).");
         }
 
-        Map<Long, Integer> soldQuantityByVariant = sale.getSaleItems().stream()
-                .collect(Collectors.groupingBy(
-                        si -> si.getProductVariant().getId(),
-                        Collectors.summingInt(SaleItem::getQuantity)
-                ));
+        Long authoritativeSellerId;
+        Map<Long, Integer> purchasedQuantityByVariant = new HashMap<>();
+        Map<Long, BigDecimal> unitPriceByVariant = new HashMap<>();
+        List<SaleReturn> previousReturns;
+        String auditReferenceType;
 
-        List<SaleReturn> previousReturns = returnRepository.findBySaleId(sale.getId());
+        if (hasSaleId) {
+            Sale sale = saleRepository.findById(requestDto.getSaleId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Sale not found with id: " + requestDto.getSaleId()));
+
+            if (caller.getRole() != User.Role.ADMIN && !sale.getSellerId().equals(caller.getId())) {
+                throw new AccessDeniedException("You are not authorized to process returns for another seller's sale.");
+            }
+
+            authoritativeSellerId = sale.getSellerId();
+            for (SaleItem si : sale.getSaleItems()) {
+                Long vId = si.getProductVariant().getId();
+                purchasedQuantityByVariant.merge(vId, si.getQuantity(), Integer::sum);
+                unitPriceByVariant.put(vId, si.getUnitPrice());
+            }
+            previousReturns = returnRepository.findBySaleId(sale.getId());
+            auditReferenceType = "SALE_RETURN";
+        } else {
+            Order order = orderRepository.findById(requestDto.getOrderId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Order not found with id: " + requestDto.getOrderId()));
+
+            if (caller.getRole() != User.Role.ADMIN && !order.getSellerId().equals(caller.getId())) {
+                throw new AccessDeniedException("You are not authorized to process returns for another seller's order.");
+            }
+
+            if (order.getStatus() != OrderStatus.DELIVERED) {
+                throw new BusinessValidationException("Returns can only be processed for DELIVERED orders (Current status: "
+                        + order.getStatus() + "). Use order cancellation/rejection for undelivered orders.");
+            }
+
+            authoritativeSellerId = order.getSellerId();
+            for (OrderItem oi : order.getOrderItems()) {
+                Long vId = oi.getProductVariant().getId();
+                purchasedQuantityByVariant.merge(vId, oi.getQuantity(), Integer::sum);
+                unitPriceByVariant.put(vId, oi.getPrice());
+            }
+            previousReturns = returnRepository.findByOrderId(order.getId());
+            auditReferenceType = "ORDER_RETURN";
+        }
+
         Map<Long, Integer> alreadyReturnedByVariant = previousReturns.stream()
                 .flatMap(sr -> sr.getItems().stream())
                 .collect(Collectors.groupingBy(
@@ -67,23 +111,26 @@ public class ReturnService {
         }
 
         SaleReturn saleReturn = SaleReturn.builder()
-                .sellerId(sale.getSellerId())
-                .saleId(sale.getId())
+                .sellerId(authoritativeSellerId)
+                .saleId(requestDto.getSaleId())
+                .orderId(requestDto.getOrderId())
                 .returnDate(LocalDate.now())
                 .reason(requestDto.getReason())
+                .totalReturnAmount(BigDecimal.ZERO)
                 .items(new ArrayList<>())
                 .build();
 
+        BigDecimal totalReturnAmount = BigDecimal.ZERO;
         List<InventoryTransaction> pendingAuditLogs = new ArrayList<>();
 
         for (Map.Entry<Long, Integer> entry : requestedReturnByVariant.entrySet()) {
             Long variantId = entry.getKey();
             int requestedQty = entry.getValue();
 
-            Integer originallySoldQty = soldQuantityByVariant.get(variantId);
+            Integer originallySoldQty = purchasedQuantityByVariant.get(variantId);
             if (originallySoldQty == null) {
                 throw new BusinessValidationException(
-                        "Variant ID " + variantId + " was not part of Sale ID " + sale.getId());
+                        "Variant ID " + variantId + " was not part of the referenced transaction.");
             }
 
             int previouslyReturnedQty = alreadyReturnedByVariant.getOrDefault(variantId, 0);
@@ -93,7 +140,7 @@ public class ReturnService {
                 throw new BusinessValidationException(
                         "Return quantity (" + requestedQty + ") exceeds remaining returnable quantity ("
                                 + remainingReturnableQty + ") for Variant ID " + variantId
-                                + " (Sold: " + originallySoldQty + ", Already Returned: " + previouslyReturnedQty + ")");
+                                + " (Purchased: " + originallySoldQty + ", Already Returned: " + previouslyReturnedQty + ")");
             }
 
             ProductVariant variant = variantRepository.findById(variantId)
@@ -105,11 +152,17 @@ public class ReturnService {
             variant.setStock(newStock);
             variantRepository.save(variant);
 
+            BigDecimal unitPrice = unitPriceByVariant.getOrDefault(variantId, variant.getSellingPrice());
+            BigDecimal lineTotal = unitPrice.multiply(BigDecimal.valueOf(requestedQty));
+            totalReturnAmount = totalReturnAmount.add(lineTotal);
+
             ReturnItem returnItem = ReturnItem.builder()
                     .saleReturn(saleReturn)
                     .variantId(variant.getId())
                     .sku(variant.getSku())
                     .quantity(requestedQty)
+                    .unitPrice(unitPrice)
+                    .totalPrice(lineTotal)
                     .build();
 
             saleReturn.getItems().add(returnItem);
@@ -118,12 +171,13 @@ public class ReturnService {
                     .productVariant(variant)
                     .type(InventoryTransaction.TransactionType.RETURN)
                     .quantity(requestedQty)
-                    .referenceType("SALE_RETURN")
+                    .referenceType(auditReferenceType)
                     .previousStock(previousStock)
                     .newStock(newStock)
                     .build());
         }
 
+        saleReturn.setTotalReturnAmount(totalReturnAmount);
         SaleReturn savedReturn = returnRepository.save(saleReturn);
 
         for (InventoryTransaction tx : pendingAuditLogs) {
@@ -131,20 +185,42 @@ public class ReturnService {
         }
         inventoryTransactionRepository.saveAll(pendingAuditLogs);
 
+        return mapToResponseDto(savedReturn);
+    }
+
+    @Transactional(readOnly = true)
+    public List<ReturnResponseDto> getAllReturns(String callerEmail) {
+        User caller = userRepository.findByEmail(callerEmail)
+                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
+
+        List<SaleReturn> returns = (caller.getRole() == User.Role.ADMIN)
+                ? returnRepository.findAll()
+                : returnRepository.findBySellerId(caller.getId());
+
+        return returns.stream()
+                .map(this::mapToResponseDto)
+                .collect(Collectors.toList());
+    }
+
+    private ReturnResponseDto mapToResponseDto(SaleReturn savedReturn) {
         List<ReturnResponseDto.ReturnItemResponseDto> itemResponseDtos = savedReturn.getItems().stream()
                 .map(ri -> ReturnResponseDto.ReturnItemResponseDto.builder()
                         .id(ri.getId())
                         .variantId(ri.getVariantId())
                         .sku(ri.getSku())
                         .quantity(ri.getQuantity())
+                        .unitPrice(ri.getUnitPrice())
+                        .totalPrice(ri.getTotalPrice())
                         .build())
                 .collect(Collectors.toList());
 
         return ReturnResponseDto.builder()
                 .id(savedReturn.getId())
                 .saleId(savedReturn.getSaleId())
+                .orderId(savedReturn.getOrderId())
                 .returnDate(savedReturn.getReturnDate())
                 .reason(savedReturn.getReason())
+                .totalReturnAmount(savedReturn.getTotalReturnAmount())
                 .items(itemResponseDtos)
                 .build();
     }

@@ -30,6 +30,7 @@ public class User {
     private Role role; // ADMIN, SELLER, BUYER[cite: 1]
 
     @Column(nullable = false)
+    @Builder.Default
     private Boolean active = true;
 
     public enum Role {

@@ -28,8 +28,11 @@ public class SaleController {
     }
 
     @GetMapping
-    public ResponseEntity<List<SaleResponseDto>> getAllSales(Authentication authentication) {
-        List<SaleResponseDto> sales = saleService.getAllSales(authentication.getName());
+    public ResponseEntity<List<SaleResponseDto>> getAllSales(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "50") int size,
+            Authentication authentication) {
+        List<SaleResponseDto> sales = saleService.getAllSales(authentication.getName(), page, size);
         return ResponseEntity.ok(sales);
     }
 }

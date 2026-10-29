@@ -7,7 +7,10 @@ import lombok.*;
 import java.math.BigDecimal;
 
 @Entity
-@Table(name = "order_items")
+@Table(name = "order_items", indexes = {
+        @Index(name = "idx_order_items_order_id", columnList = "order_id"),
+        @Index(name = "idx_order_items_variant_id", columnList = "product_variant_id")
+})
 @Getter
 @Setter
 @NoArgsConstructor
@@ -23,7 +26,6 @@ public class OrderItem {
     @JoinColumn(name = "order_id", nullable = false)
     private Order order;
 
-    // 🟢 FIX: Product ki jagah Variant save karenge taaki Size aur Color mil sake
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "product_variant_id", nullable = false)
     private ProductVariant productVariant;
@@ -31,6 +33,6 @@ public class OrderItem {
     @Column(nullable = false)
     private Integer quantity;
 
-    @Column(nullable = false)
+    @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal price;
 }

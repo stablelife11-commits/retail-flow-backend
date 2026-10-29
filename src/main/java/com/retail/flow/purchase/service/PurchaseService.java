@@ -1,6 +1,7 @@
 package com.retail.flow.purchase.service;
 
 import com.retail.flow.common.exception.ResourceNotFoundException;
+import com.retail.flow.common.security.CurrentUserService;
 import com.retail.flow.inventory.entity.InventoryTransaction;
 import com.retail.flow.inventory.repository.InventoryTransactionRepository;
 import com.retail.flow.product.entity.ProductVariant;
@@ -13,8 +14,11 @@ import com.retail.flow.purchase.repository.PurchaseRepository;
 import com.retail.flow.supplier.entity.Supplier;
 import com.retail.flow.supplier.repository.SupplierRepository;
 import com.retail.flow.user.entity.User;
-import com.retail.flow.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,11 +36,11 @@ public class PurchaseService {
     private final SupplierRepository supplierRepository;
     private final ProductVariantRepository productVariantRepository;
     private final InventoryTransactionRepository inventoryTransactionRepository;
-    private final UserRepository userRepository;
+    private final CurrentUserService currentUserService;
 
     @Transactional
     public PurchaseResponseDto createPurchase(PurchaseRequestDto requestDto, String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
+        User caller = currentUserService.getCurrentUser(callerEmail);
 
         Supplier supplier = supplierRepository.findById(requestDto.getSupplierId())
                 .orElseThrow(() -> new ResourceNotFoundException("Supplier not found with id: " + requestDto.getSupplierId()));
@@ -49,7 +53,7 @@ public class PurchaseService {
 
         Purchase purchase = Purchase.builder()
                 .sellerId(authoritativeSellerId)
-                .purchaseNumber(requestDto.getPurchaseNumber())
+                .purchaseNumber(requestDto.getPurchaseNumber().trim())
                 .supplier(supplier)
                 .purchaseDate(requestDto.getPurchaseDate())
                 .purchaseItems(new ArrayList<>())
@@ -109,20 +113,17 @@ public class PurchaseService {
     }
 
     @Transactional(readOnly = true)
-    public List<PurchaseResponseDto> getAllPurchases(String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
-        List<Purchase> purchases = (caller.getRole() == User.Role.ADMIN)
-                ? purchaseRepository.findAll()
-                : purchaseRepository.findBySellerId(caller.getId());
+    public List<PurchaseResponseDto> getAllPurchases(String callerEmail, int page, int size) {
+        User caller = currentUserService.getCurrentUser(callerEmail);
+        Pageable pageable = PageRequest.of(Math.max(page, 0), Math.min(Math.max(size, 1), 100), Sort.by("id").descending());
+
+        Page<Purchase> purchases = (caller.getRole() == User.Role.ADMIN)
+                ? purchaseRepository.findAll(pageable)
+                : purchaseRepository.findBySellerId(caller.getId(), pageable);
 
         return purchases.stream()
                 .map(this::mapToResponseDto)
                 .collect(Collectors.toList());
-    }
-
-    private User getUserByEmail(String email) {
-        return userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
     }
 
     private PurchaseResponseDto mapToResponseDto(Purchase purchase) {

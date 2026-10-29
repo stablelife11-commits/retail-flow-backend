@@ -16,6 +16,8 @@ public class SaleResponseDto {
     private String customerName;
     private LocalDate saleDate;
     private BigDecimal totalAmount;
+    private BigDecimal paidAmount;
+    private String paymentStatus;
     private List<SaleItemResponseDto> items;
 
     @Data

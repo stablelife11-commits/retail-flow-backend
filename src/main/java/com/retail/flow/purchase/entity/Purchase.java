@@ -3,6 +3,7 @@ package com.retail.flow.purchase.entity;
 import com.retail.flow.supplier.entity.Supplier;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.BatchSize;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -42,5 +43,6 @@ public class Purchase {
     private BigDecimal totalAmount;
 
     @OneToMany(mappedBy = "purchase", cascade = CascadeType.ALL, orphanRemoval = true)
+    @BatchSize(size = 50)
     private List<PurchaseItem> purchaseItems;
 }

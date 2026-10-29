@@ -35,5 +35,9 @@ public class ProductResponseDto {
         private BigDecimal purchasePrice;
 
         private Integer stock;
+        private Integer minimumOrderQuantity;
+        private Integer packSize;
+        private String hsnCode;
+        private BigDecimal gstPercentage;
     }
 }

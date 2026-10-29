@@ -29,9 +29,10 @@ public class DataInitializer implements CommandLineRunner {
     public void run(String... args) {
         try {
             productVariantRepository.fixNullVersions();
-            log.info("Database Versioning Synchronized Successfully");
+            productVariantRepository.backfillNullSellerIds();
+            log.info("Database Versioning and Variant Seller IDs Synchronized Successfully");
         } catch (Exception e) {
-            log.warn("Versioning Fix Skipped: {}", e.getMessage());
+            log.warn("Startup data backfill skipped: {}", e.getMessage());
         }
 
         if (!userRepository.existsByRole(User.Role.ADMIN)) {

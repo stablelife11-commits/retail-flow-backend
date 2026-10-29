@@ -1,6 +1,8 @@
 package com.retail.flow.sale.repository;
 
 import com.retail.flow.sale.entity.Sale;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -19,10 +21,13 @@ public interface SaleRepository extends JpaRepository<Sale, Long> {
     @Query("SELECT COALESCE(SUM(s.totalAmount), 0) FROM Sale s WHERE s.sellerId = :sellerId")
     BigDecimal sumTotalSalesBySellerId(@Param("sellerId") Long sellerId);
 
-    @EntityGraph(attributePaths = {"customer", "saleItems", "saleItems.productVariant"})
-    List<Sale> findBySellerId(Long sellerId);
+    @EntityGraph(attributePaths = {"customer"})
+    Page<Sale> findBySellerId(Long sellerId, Pageable pageable);
 
     @Override
+    @EntityGraph(attributePaths = {"customer"})
+    Page<Sale> findAll(Pageable pageable);
+
     @EntityGraph(attributePaths = {"customer", "saleItems", "saleItems.productVariant"})
-    List<Sale> findAll();
+    List<Sale> findBySellerId(Long sellerId);
 }

@@ -10,6 +10,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
+
 @RestController
 @RequestMapping("/api/v1/returns")
 @RequiredArgsConstructor
@@ -23,5 +25,11 @@ public class ReturnController {
             Authentication authentication) {
         ReturnResponseDto response = returnService.processReturn(requestDto, authentication.getName());
         return new ResponseEntity<>(response, HttpStatus.CREATED);
+    }
+
+    @GetMapping
+    public ResponseEntity<List<ReturnResponseDto>> getAllReturns(Authentication authentication) {
+        List<ReturnResponseDto> returns = returnService.getAllReturns(authentication.getName());
+        return ResponseEntity.ok(returns);
     }
 }
