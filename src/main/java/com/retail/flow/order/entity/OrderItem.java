@@ -35,4 +35,7 @@ public class OrderItem {
 
     @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal price;
+
+    @Column(name = "item_note", length = 500)
+    private String itemNote;
 }

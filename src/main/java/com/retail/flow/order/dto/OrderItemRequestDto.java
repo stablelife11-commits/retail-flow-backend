@@ -4,6 +4,8 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import lombok.Data;
 
+import java.math.BigDecimal;
+
 @Data
 public class OrderItemRequestDto {
 
@@ -13,4 +15,10 @@ public class OrderItemRequestDto {
     @NotNull(message = "Quantity is required")
     @Min(value = 1, message = "Quantity must be at least 1")
     private Integer quantity;
+
+    // Optional negotiated unit price when Seller modifies an order
+    private BigDecimal unitPrice;
+
+    // Optional buyer/seller note for this specific product variant
+    private String itemNote;
 }

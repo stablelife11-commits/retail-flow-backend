@@ -2,6 +2,7 @@ package com.retail.flow.order.controller;
 
 import com.retail.flow.order.dto.OrderRequestDto;
 import com.retail.flow.order.dto.OrderResponseDto;
+import com.retail.flow.order.dto.SellerOrderUpdateRequestDto;
 import com.retail.flow.order.service.OrderService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -60,6 +61,15 @@ public class OrderController {
             Authentication authentication) {
         List<OrderResponseDto> orders = orderService.getOrdersBySellerId(sellerId, authentication.getName(), page, size);
         return ResponseEntity.ok(orders);
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<OrderResponseDto> modifyOrderBySeller(
+            @PathVariable Long id,
+            @Valid @RequestBody SellerOrderUpdateRequestDto requestDto,
+            Authentication authentication) {
+        OrderResponseDto response = orderService.modifyOrderBySeller(id, requestDto, authentication.getName());
+        return ResponseEntity.ok(response);
     }
 
     @PatchMapping("/{id}/status")

@@ -10,6 +10,7 @@ import com.retail.flow.inventory.repository.InventoryTransactionRepository;
 import com.retail.flow.order.dto.OrderItemRequestDto;
 import com.retail.flow.order.dto.OrderRequestDto;
 import com.retail.flow.order.dto.OrderResponseDto;
+import com.retail.flow.order.dto.SellerOrderUpdateRequestDto;
 import com.retail.flow.order.entity.Order;
 import com.retail.flow.order.entity.Order.OrderStatus;
 import com.retail.flow.order.entity.Order.PaymentStatus;
@@ -26,6 +27,7 @@ import org.springframework.data.domain.Sort;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
 import java.util.*;
@@ -60,12 +62,18 @@ public class OrderService {
                 .orElseThrow(() -> new BusinessValidationException("Customer profile not found for current user"));
 
         Map<Long, Integer> mergedQuantities = new LinkedHashMap<>();
+        Map<Long, String> mergedNotes = new HashMap<>();
+
         for (OrderItemRequestDto item : requestDto.getItems()) {
             mergedQuantities.merge(item.getVariantId(), item.getQuantity(), Integer::sum);
+            if (StringUtils.hasText(item.getItemNote())) {
+                mergedNotes.merge(item.getVariantId(), item.getItemNote().trim(),
+                        (oldNote, newNote) -> oldNote.equals(newNote) ? oldNote : oldNote + " | " + newNote);
+            }
         }
 
         Map<Long, ProductVariant> variantMap = new HashMap<>();
-        Map<Long, List<Map.Entry<Long, Integer>>> itemsBySeller = new LinkedHashMap<>();
+        Map<Long, List> itemsBySeller = new LinkedHashMap<>();
         Map<Long, User> verifiedSellers = new HashMap<>();
 
         for (Map.Entry<Long, Integer> entry : mergedQuantities.entrySet()) {
@@ -119,7 +127,7 @@ public class OrderService {
 
         List<OrderResponseDto> responses = new ArrayList<>();
 
-        for (Map.Entry<Long, List<Map.Entry<Long, Integer>>> sellerGroup : itemsBySeller.entrySet()) {
+        for (Map.Entry<Long, List> sellerGroup : itemsBySeller.entrySet()) {
             Long sellerId = sellerGroup.getKey();
             List<Map.Entry<Long, Integer>> sellerItems = sellerGroup.getValue();
 
@@ -128,6 +136,7 @@ public class OrderService {
                     .sellerId(sellerId)
                     .orderItems(new ArrayList<>())
                     .totalAmount(BigDecimal.ZERO)
+                    .discountAmount(BigDecimal.ZERO)
                     .paidAmount(BigDecimal.ZERO)
                     .paymentStatus(PaymentStatus.UNPAID)
                     .deliveryAddress(requestDto.getDeliveryAddress())
@@ -155,6 +164,7 @@ public class OrderService {
                         .productVariant(variant)
                         .quantity(quantity)
                         .price(variant.getSellingPrice())
+                        .itemNote(mergedNotes.get(variant.getId()))
                         .build();
 
                 order.getOrderItems().add(orderItem);
@@ -181,6 +191,141 @@ public class OrderService {
         }
 
         return responses;
+    }
+
+    @Transactional
+    public OrderResponseDto modifyOrderBySeller(Long orderId, SellerOrderUpdateRequestDto requestDto, String callerEmail) {
+        User caller = currentUserService.getCurrentUser(callerEmail);
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new ResourceNotFoundException("Order not found with id: " + orderId));
+
+        if (caller.getRole() != User.Role.ADMIN && !order.getSellerId().equals(caller.getId())) {
+            throw new AccessDeniedException("You are not authorized to modify another seller's order.");
+        }
+
+        if (order.getStatus() != OrderStatus.PLACED && order.getStatus() != OrderStatus.CONFIRMED) {
+            throw new BusinessValidationException(
+                    "Order #" + orderId + " cannot be modified because it is already in " + order.getStatus() + " status.");
+        }
+
+        List<InventoryTransaction> inventoryLogs = new ArrayList<>();
+
+        // 1. Restore previously reserved stock for all existing items in this order
+        if (order.getOrderItems() != null && !order.getOrderItems().isEmpty()) {
+            for (OrderItem oldItem : order.getOrderItems()) {
+                ProductVariant oldVariant = productVariantRepository.findById(oldItem.getProductVariant().getId())
+                        .orElseThrow(() -> new ResourceNotFoundException("Variant not found: " + oldItem.getProductVariant().getId()));
+                int prevStock = oldVariant.getStock();
+                int restoredStock = prevStock + oldItem.getQuantity();
+                oldVariant.setStock(restoredStock);
+                productVariantRepository.save(oldVariant);
+
+                inventoryLogs.add(InventoryTransaction.builder()
+                        .productVariant(oldVariant)
+                        .type(InventoryTransaction.TransactionType.ORDER_RELEASE)
+                        .quantity(oldItem.getQuantity())
+                        .referenceType("ORDER_MODIFICATION_RELEASE")
+                        .referenceId(order.getId())
+                        .previousStock(prevStock)
+                        .newStock(restoredStock)
+                        .build());
+            }
+            order.getOrderItems().clear();
+            orderRepository.flush();
+        }
+
+        // 2. Apply updated items, custom negotiated prices, and deduct stock
+        BigDecimal subtotal = BigDecimal.ZERO;
+        for (OrderItemRequestDto itemReq : requestDto.getItems()) {
+            ProductVariant variant = productVariantRepository.findById(itemReq.getVariantId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Variant not found with id: " + itemReq.getVariantId()));
+
+            if (!variant.getProduct().getSellerId().equals(order.getSellerId())) {
+                throw new BusinessValidationException(
+                        "Variant SKU '" + variant.getSku() + "' does not belong to your seller catalog.");
+            }
+
+            if (variant.getStock() < itemReq.getQuantity()) {
+                throw new BusinessValidationException("Insufficient stock for SKU '" + variant.getSku()
+                        + "' (Available: " + variant.getStock() + ", Requested: " + itemReq.getQuantity() + ").");
+            }
+
+            int prevStock = variant.getStock();
+            int newStock = prevStock - itemReq.getQuantity();
+            variant.setStock(newStock);
+            productVariantRepository.save(variant);
+
+            inventoryLogs.add(InventoryTransaction.builder()
+                    .productVariant(variant)
+                    .type(InventoryTransaction.TransactionType.ORDER_RESERVATION)
+                    .quantity(itemReq.getQuantity())
+                    .referenceType("ORDER_MODIFICATION_RESERVE")
+                    .referenceId(order.getId())
+                    .previousStock(prevStock)
+                    .newStock(newStock)
+                    .build());
+
+            BigDecimal negotiatedUnitPrice = (itemReq.getUnitPrice() != null
+                    && itemReq.getUnitPrice().compareTo(BigDecimal.ZERO) > 0)
+                    ? itemReq.getUnitPrice()
+                    : variant.getSellingPrice();
+
+            BigDecimal lineTotal = negotiatedUnitPrice.multiply(BigDecimal.valueOf(itemReq.getQuantity()));
+            subtotal = subtotal.add(lineTotal);
+
+            OrderItem newItem = OrderItem.builder()
+                    .order(order)
+                    .productVariant(variant)
+                    .quantity(itemReq.getQuantity())
+                    .price(negotiatedUnitPrice)
+                    .itemNote(StringUtils.hasText(itemReq.getItemNote()) ? itemReq.getItemNote().trim() : null)
+                    .build();
+
+            order.getOrderItems().add(newItem);
+        }
+
+        // 3. Apply delivery address, discount, seller remarks, and recalculate total
+        if (StringUtils.hasText(requestDto.getDeliveryAddress())) {
+            order.setDeliveryAddress(requestDto.getDeliveryAddress().trim());
+        }
+
+        BigDecimal discount = (requestDto.getDiscountAmount() != null
+                && requestDto.getDiscountAmount().compareTo(BigDecimal.ZERO) > 0)
+                ? requestDto.getDiscountAmount()
+                : BigDecimal.ZERO;
+
+        if (discount.compareTo(subtotal) > 0) {
+            throw new BusinessValidationException(
+                    "Discount amount (₹" + discount + ") cannot exceed order subtotal (₹" + subtotal + ").");
+        }
+
+        order.setDiscountAmount(discount);
+        order.setSellerRemarks(StringUtils.hasText(requestDto.getSellerRemarks())
+                ? requestDto.getSellerRemarks().trim()
+                : null);
+
+        BigDecimal finalTotal = subtotal.subtract(discount);
+        order.setTotalAmount(finalTotal);
+
+        BigDecimal paid = order.getPaidAmount() != null ? order.getPaidAmount() : BigDecimal.ZERO;
+        if (paid.compareTo(BigDecimal.ZERO) <= 0) {
+            order.setPaymentStatus(PaymentStatus.UNPAID);
+        } else if (paid.compareTo(finalTotal) >= 0) {
+            order.setPaymentStatus(PaymentStatus.PAID);
+        } else {
+            order.setPaymentStatus(PaymentStatus.PARTIALLY_PAID);
+        }
+
+        if (Boolean.TRUE.equals(requestDto.getConfirmImmediately()) && order.getStatus() == OrderStatus.PLACED) {
+            order.setStatus(OrderStatus.CONFIRMED);
+        }
+
+        Order savedOrder = orderRepository.save(order);
+        if (!inventoryLogs.isEmpty()) {
+            inventoryTransactionRepository.saveAll(inventoryLogs);
+        }
+
+        return mapToResponseDto(savedOrder);
     }
 
     @Transactional
@@ -295,15 +440,22 @@ public class OrderService {
     private OrderResponseDto mapToResponseDto(Order order) {
         List<OrderResponseDto.OrderItemResponseDto> itemDtos = order.getOrderItems().stream()
                 .map(item -> OrderResponseDto.OrderItemResponseDto.builder()
+                        .id(item.getId())
                         .productId(item.getProductVariant().getProduct().getId())
                         .productName(item.getProductVariant().getProduct().getName())
                         .variantId(item.getProductVariant().getId())
+                        .sku(item.getProductVariant().getSku())
                         .size(item.getProductVariant().getSize())
                         .color(item.getProductVariant().getColor())
                         .quantity(item.getQuantity())
                         .price(item.getPrice())
+                        .itemNote(item.getItemNote())
                         .build())
                 .collect(Collectors.toList());
+
+        BigDecimal discount = order.getDiscountAmount() != null ? order.getDiscountAmount() : BigDecimal.ZERO;
+        BigDecimal total = order.getTotalAmount() != null ? order.getTotalAmount() : BigDecimal.ZERO;
+        BigDecimal subtotal = total.add(discount);
 
         return OrderResponseDto.builder()
                 .id(order.getId())
@@ -313,9 +465,12 @@ public class OrderService {
                 .customerMobile(order.getCustomer().getMobile())
                 .status(order.getStatus().name())
                 .deliveryAddress(order.getDeliveryAddress())
-                .totalAmount(order.getTotalAmount())
+                .subtotalAmount(subtotal)
+                .discountAmount(discount)
+                .totalAmount(total)
                 .paidAmount(order.getPaidAmount() != null ? order.getPaidAmount() : BigDecimal.ZERO)
                 .paymentStatus(order.getPaymentStatus() != null ? order.getPaymentStatus().name() : PaymentStatus.UNPAID.name())
+                .sellerRemarks(order.getSellerRemarks())
                 .orderDate(order.getOrderDate())
                 .items(itemDtos)
                 .build();

@@ -41,6 +41,13 @@ public class Order {
     @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal totalAmount;
 
+    @Column(name = "discount_amount", nullable = false, precision = 19, scale = 2, columnDefinition = "DECIMAL(19,2) NOT NULL DEFAULT 0.00")
+    @Builder.Default
+    private BigDecimal discountAmount = BigDecimal.ZERO;
+
+    @Column(name = "seller_remarks", length = 500)
+    private String sellerRemarks;
+
     @Column(name = "paid_amount", nullable = false, precision = 19, scale = 2, columnDefinition = "DECIMAL(19,2) NOT NULL DEFAULT 0.00")
     @Builder.Default
     private BigDecimal paidAmount = BigDecimal.ZERO;
@@ -67,6 +74,9 @@ public class Order {
         }
         if (this.status == null) {
             this.status = OrderStatus.PLACED;
+        }
+        if (this.discountAmount == null) {
+            this.discountAmount = BigDecimal.ZERO;
         }
         if (this.paidAmount == null) {
             this.paidAmount = BigDecimal.ZERO;
