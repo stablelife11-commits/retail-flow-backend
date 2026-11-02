@@ -2,6 +2,7 @@ package com.retail.flow.product.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.BatchSize;
 
 import java.math.BigDecimal;
 
@@ -14,6 +15,7 @@ import java.math.BigDecimal;
                 @Index(name = "idx_product_variants_seller_id", columnList = "seller_id"),
                 @Index(name = "idx_product_variants_product_id", columnList = "product_id")
         })
+@BatchSize(size = 50)
 @Getter
 @Setter
 @NoArgsConstructor

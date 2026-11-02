@@ -22,4 +22,11 @@ public class RegisterRequestDto {
     @NotBlank(message = "Mobile number is required")
     @Pattern(regexp = "^\\d{10}$", message = "Mobile number must be exactly 10 digits")
     private String mobile;
+
+    // Optional: BUYER (default) or SELLER. Self-registration as ADMIN is strictly forbidden.
+    private String role;
+
+    private String businessName;
+    private String gstNumber;
+    private String businessAddress;
 }

@@ -33,7 +33,17 @@ public class AuthService {
             throw new BusinessValidationException("Email is already registered!");
         }
 
-        if (customerRepository.existsBySellerIdIsNullAndMobile(trimmedMobile)) {
+        User.Role targetRole = User.Role.BUYER;
+        if (StringUtils.hasText(requestDto.getRole())) {
+            String requestedRole = requestDto.getRole().trim().toUpperCase();
+            if ("SELLER".equals(requestedRole)) {
+                targetRole = User.Role.SELLER;
+            } else if (!"BUYER".equals(requestedRole)) {
+                throw new BusinessValidationException("Invalid registration role. Only BUYER or SELLER registration is allowed.");
+            }
+        }
+
+        if (targetRole == User.Role.BUYER && customerRepository.existsBySellerIdIsNullAndMobile(trimmedMobile)) {
             throw new BusinessValidationException("Mobile number is already registered to another buyer account!");
         }
 
@@ -41,13 +51,21 @@ public class AuthService {
                 .name(requestDto.getName().trim())
                 .email(normalizedEmail)
                 .password(passwordEncoder.encode(requestDto.getPassword()))
-                .role(User.Role.BUYER)
+                .role(targetRole)
                 .active(true)
+                .businessName(StringUtils.hasText(requestDto.getBusinessName()) ? requestDto.getBusinessName().trim() : null)
+                .gstNumber(StringUtils.hasText(requestDto.getGstNumber()) ? requestDto.getGstNumber().trim().toUpperCase() : null)
+                .businessPhone(trimmedMobile)
+                .businessAddress(StringUtils.hasText(requestDto.getBusinessAddress()) ? requestDto.getBusinessAddress().trim() : null)
                 .build();
 
         user = userRepository.save(user);
 
-        Customer customer = getOrCreatePlatformBuyerProfile(user, trimmedMobile);
+        Long customerId = null;
+        if (targetRole == User.Role.BUYER) {
+            Customer customer = getOrCreatePlatformBuyerProfile(user, trimmedMobile);
+            customerId = customer.getId();
+        }
 
         String token = tokenProvider.generateToken(user.getId(), user.getEmail(), user.getRole().name());
 
@@ -57,7 +75,11 @@ public class AuthService {
                 .email(user.getEmail())
                 .name(user.getName())
                 .role(user.getRole().name())
-                .customerId(customer.getId())
+                .customerId(customerId)
+                .businessName(user.getBusinessName())
+                .gstNumber(user.getGstNumber())
+                .businessPhone(user.getBusinessPhone())
+                .businessAddress(user.getBusinessAddress())
                 .build();
     }
 
@@ -91,11 +113,13 @@ public class AuthService {
                 .name(user.getName())
                 .role(user.getRole().name())
                 .customerId(customerId)
+                .businessName(user.getBusinessName())
+                .gstNumber(user.getGstNumber())
+                .businessPhone(user.getBusinessPhone())
+                .businessAddress(user.getBusinessAddress())
                 .build();
     }
 
-    // SECURITY FIX (F-002): Never overwrite or hijack seller-managed offline Customer records.
-    // Always maintain an isolated platform buyer Customer record (sellerId = null).
     private Customer getOrCreatePlatformBuyerProfile(User user, String providedMobile) {
         return customerRepository.findByEmail(user.getEmail())
                 .orElseGet(() -> {

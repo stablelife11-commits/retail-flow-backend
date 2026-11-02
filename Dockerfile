@@ -16,6 +16,9 @@ COPY --from=builder /app/target/*.jar app.jar
 RUN chown retailflow:retailflow app.jar
 USER retailflow
 
+# Enforce strict production profile by default in container deployments
+ENV SPRING_PROFILES_ACTIVE=prod
+
 EXPOSE 8080
 
 # JVM memory flags tuned for cloud containers (512MB - 1GB RAM)

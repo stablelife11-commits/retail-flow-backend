@@ -1,5 +1,6 @@
 package com.retail.flow.order.service;
 
+import com.retail.flow.cart.repository.CartRepository;
 import com.retail.flow.common.exception.BusinessValidationException;
 import com.retail.flow.common.exception.ResourceNotFoundException;
 import com.retail.flow.common.security.CurrentUserService;
@@ -30,12 +31,21 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
-import java.util.*;
+import java.math.RoundingMode;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 public class OrderService {
+
+    private static final BigDecimal HUNDRED = new BigDecimal("100");
 
     private final OrderRepository orderRepository;
     private final CustomerRepository customerRepository;
@@ -43,6 +53,9 @@ public class OrderService {
     private final InventoryTransactionRepository inventoryTransactionRepository;
     private final UserRepository userRepository;
     private final CurrentUserService currentUserService;
+    private final CartRepository cartRepository;
+
+    private record SellerLineItem(Long variantId, int quantity) {}
 
     @Transactional
     public OrderResponseDto createOrder(OrderRequestDto requestDto, String userEmail) {
@@ -73,7 +86,7 @@ public class OrderService {
         }
 
         Map<Long, ProductVariant> variantMap = new HashMap<>();
-        Map<Long, List> itemsBySeller = new LinkedHashMap<>();
+        Map<Long, List<SellerLineItem>> itemsBySeller = new LinkedHashMap<>();
         Map<Long, User> verifiedSellers = new HashMap<>();
 
         for (Map.Entry<Long, Integer> entry : mergedQuantities.entrySet()) {
@@ -117,7 +130,8 @@ public class OrderService {
             }
 
             variantMap.put(variantId, variant);
-            itemsBySeller.computeIfAbsent(sellerId, k -> new ArrayList<>()).add(entry);
+            itemsBySeller.computeIfAbsent(sellerId, k -> new ArrayList<>())
+                    .add(new SellerLineItem(variantId, requestedQty));
         }
 
         if (!allowMultiSellerSplit && itemsBySeller.size() > 1) {
@@ -127,9 +141,8 @@ public class OrderService {
 
         List<OrderResponseDto> responses = new ArrayList<>();
 
-        for (Map.Entry<Long, List> sellerGroup : itemsBySeller.entrySet()) {
-            Long sellerId = sellerGroup.getKey();
-            List<Map.Entry<Long, Integer>> sellerItems = sellerGroup.getValue();
+        for (Long sellerId : itemsBySeller.keySet()) {
+            List<SellerLineItem> sellerItems = itemsBySeller.get(sellerId);
 
             Order order = Order.builder()
                     .customer(customer)
@@ -137,6 +150,8 @@ public class OrderService {
                     .orderItems(new ArrayList<>())
                     .totalAmount(BigDecimal.ZERO)
                     .discountAmount(BigDecimal.ZERO)
+                    .taxAmount(BigDecimal.ZERO)
+                    .returnedAmount(BigDecimal.ZERO)
                     .paidAmount(BigDecimal.ZERO)
                     .paymentStatus(PaymentStatus.UNPAID)
                     .deliveryAddress(requestDto.getDeliveryAddress())
@@ -144,11 +159,12 @@ public class OrderService {
                     .build();
 
             BigDecimal totalAmount = BigDecimal.ZERO;
+            BigDecimal totalTaxAmount = BigDecimal.ZERO;
             List<InventoryTransaction> pendingAuditLogs = new ArrayList<>();
 
-            for (Map.Entry<Long, Integer> itemEntry : sellerItems) {
-                ProductVariant variant = variantMap.get(itemEntry.getKey());
-                int quantity = itemEntry.getValue();
+            for (SellerLineItem itemEntry : sellerItems) {
+                ProductVariant variant = variantMap.get(itemEntry.variantId());
+                int quantity = itemEntry.quantity();
 
                 int previousStock = variant.getStock();
                 int newStock = previousStock - quantity;
@@ -157,13 +173,20 @@ public class OrderService {
                 productVariantRepository.save(variant);
 
                 BigDecimal lineTotal = variant.getSellingPrice().multiply(BigDecimal.valueOf(quantity));
+                BigDecimal gstPct = variant.getGstPercentage() != null ? variant.getGstPercentage() : BigDecimal.ZERO;
+                BigDecimal itemTax = calculateInclusiveGstTax(lineTotal, gstPct);
+
                 totalAmount = totalAmount.add(lineTotal);
+                totalTaxAmount = totalTaxAmount.add(itemTax);
 
                 OrderItem orderItem = OrderItem.builder()
                         .order(order)
                         .productVariant(variant)
                         .quantity(quantity)
                         .price(variant.getSellingPrice())
+                        .hsnCode(variant.getHsnCode())
+                        .gstPercentage(gstPct)
+                        .taxAmount(itemTax)
                         .itemNote(mergedNotes.get(variant.getId()))
                         .build();
 
@@ -180,6 +203,7 @@ public class OrderService {
             }
 
             order.setTotalAmount(totalAmount);
+            order.setTaxAmount(totalTaxAmount);
             Order savedOrder = orderRepository.save(order);
 
             for (InventoryTransaction tx : pendingAuditLogs) {
@@ -189,6 +213,14 @@ public class OrderService {
 
             responses.add(mapToResponseDto(savedOrder));
         }
+
+        cartRepository.findByCustomerId(customer.getId()).ifPresent(cart -> {
+            if (cart.getItems() != null && !cart.getItems().isEmpty()) {
+                cart.getItems().clear();
+                cart.setUpdatedAt(LocalDateTime.now());
+                cartRepository.save(cart);
+            }
+        });
 
         return responses;
     }
@@ -210,7 +242,6 @@ public class OrderService {
 
         List<InventoryTransaction> inventoryLogs = new ArrayList<>();
 
-        // 1. Restore previously reserved stock for all existing items in this order
         if (order.getOrderItems() != null && !order.getOrderItems().isEmpty()) {
             for (OrderItem oldItem : order.getOrderItems()) {
                 ProductVariant oldVariant = productVariantRepository.findById(oldItem.getProductVariant().getId())
@@ -234,8 +265,9 @@ public class OrderService {
             orderRepository.flush();
         }
 
-        // 2. Apply updated items, custom negotiated prices, and deduct stock
         BigDecimal subtotal = BigDecimal.ZERO;
+        BigDecimal totalTaxAmount = BigDecimal.ZERO;
+
         for (OrderItemRequestDto itemReq : requestDto.getItems()) {
             ProductVariant variant = productVariantRepository.findById(itemReq.getVariantId())
                     .orElseThrow(() -> new ResourceNotFoundException("Variant not found with id: " + itemReq.getVariantId()));
@@ -271,20 +303,26 @@ public class OrderService {
                     : variant.getSellingPrice();
 
             BigDecimal lineTotal = negotiatedUnitPrice.multiply(BigDecimal.valueOf(itemReq.getQuantity()));
+            BigDecimal gstPct = variant.getGstPercentage() != null ? variant.getGstPercentage() : BigDecimal.ZERO;
+            BigDecimal itemTax = calculateInclusiveGstTax(lineTotal, gstPct);
+
             subtotal = subtotal.add(lineTotal);
+            totalTaxAmount = totalTaxAmount.add(itemTax);
 
             OrderItem newItem = OrderItem.builder()
                     .order(order)
                     .productVariant(variant)
                     .quantity(itemReq.getQuantity())
                     .price(negotiatedUnitPrice)
+                    .hsnCode(variant.getHsnCode())
+                    .gstPercentage(gstPct)
+                    .taxAmount(itemTax)
                     .itemNote(StringUtils.hasText(itemReq.getItemNote()) ? itemReq.getItemNote().trim() : null)
                     .build();
 
             order.getOrderItems().add(newItem);
         }
 
-        // 3. Apply delivery address, discount, seller remarks, and recalculate total
         if (StringUtils.hasText(requestDto.getDeliveryAddress())) {
             order.setDeliveryAddress(requestDto.getDeliveryAddress().trim());
         }
@@ -299,18 +337,27 @@ public class OrderService {
                     "Discount amount (₹" + discount + ") cannot exceed order subtotal (₹" + subtotal + ").");
         }
 
+        BigDecimal finalTotal = subtotal.subtract(discount);
+        BigDecimal paid = order.getPaidAmount() != null ? order.getPaidAmount() : BigDecimal.ZERO;
+
+        if (finalTotal.compareTo(paid) < 0) {
+            throw new BusinessValidationException(
+                    "Modified order total (₹" + finalTotal + ") cannot be less than the amount already paid by the buyer (₹" + paid + ").");
+        }
+
         order.setDiscountAmount(discount);
+        order.setTaxAmount(totalTaxAmount);
         order.setSellerRemarks(StringUtils.hasText(requestDto.getSellerRemarks())
                 ? requestDto.getSellerRemarks().trim()
                 : null);
-
-        BigDecimal finalTotal = subtotal.subtract(discount);
         order.setTotalAmount(finalTotal);
 
-        BigDecimal paid = order.getPaidAmount() != null ? order.getPaidAmount() : BigDecimal.ZERO;
+        BigDecimal returned = order.getReturnedAmount() != null ? order.getReturnedAmount() : BigDecimal.ZERO;
+        BigDecimal netPayable = finalTotal.subtract(returned).max(BigDecimal.ZERO);
+
         if (paid.compareTo(BigDecimal.ZERO) <= 0) {
             order.setPaymentStatus(PaymentStatus.UNPAID);
-        } else if (paid.compareTo(finalTotal) >= 0) {
+        } else if (paid.compareTo(netPayable) >= 0) {
             order.setPaymentStatus(PaymentStatus.PAID);
         } else {
             order.setPaymentStatus(PaymentStatus.PARTIALLY_PAID);
@@ -400,6 +447,27 @@ public class OrderService {
     }
 
     @Transactional(readOnly = true)
+    public OrderResponseDto getOrderById(Long orderId, String callerEmail) {
+        User caller = currentUserService.getCurrentUser(callerEmail);
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new ResourceNotFoundException("Order not found with id: " + orderId));
+
+        if (caller.getRole() == User.Role.BUYER) {
+            Customer buyerCustomer = customerRepository.findByEmail(callerEmail)
+                    .orElseThrow(() -> new AccessDeniedException("Customer profile not found"));
+            if (!order.getCustomer().getId().equals(buyerCustomer.getId())) {
+                throw new AccessDeniedException("You are not authorized to view another buyer's order.");
+            }
+        } else if (caller.getRole() == User.Role.SELLER) {
+            if (!order.getSellerId().equals(caller.getId())) {
+                throw new AccessDeniedException("You are not authorized to view another seller's order.");
+            }
+        }
+
+        return mapToResponseDto(order);
+    }
+
+    @Transactional(readOnly = true)
     public List<OrderResponseDto> getAllOrders(int page, int size) {
         Pageable pageable = buildPageable(page, size);
         return orderRepository.findAll(pageable).stream()
@@ -431,6 +499,16 @@ public class OrderService {
                 .collect(Collectors.toList());
     }
 
+    private BigDecimal calculateInclusiveGstTax(BigDecimal grossAmount, BigDecimal gstPercentage) {
+        if (grossAmount == null || gstPercentage == null
+                || grossAmount.compareTo(BigDecimal.ZERO) <= 0
+                || gstPercentage.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        return grossAmount.multiply(gstPercentage)
+                .divide(HUNDRED.add(gstPercentage), 2, RoundingMode.HALF_UP);
+    }
+
     private Pageable buildPageable(int page, int size) {
         int safePage = Math.max(page, 0);
         int safeSize = Math.min(Math.max(size, 1), 100);
@@ -447,6 +525,9 @@ public class OrderService {
                         .sku(item.getProductVariant().getSku())
                         .size(item.getProductVariant().getSize())
                         .color(item.getProductVariant().getColor())
+                        .hsnCode(item.getHsnCode() != null ? item.getHsnCode() : item.getProductVariant().getHsnCode())
+                        .gstPercentage(item.getGstPercentage() != null ? item.getGstPercentage() : BigDecimal.ZERO)
+                        .taxAmount(item.getTaxAmount() != null ? item.getTaxAmount() : BigDecimal.ZERO)
                         .quantity(item.getQuantity())
                         .price(item.getPrice())
                         .itemNote(item.getItemNote())
@@ -457,9 +538,24 @@ public class OrderService {
         BigDecimal total = order.getTotalAmount() != null ? order.getTotalAmount() : BigDecimal.ZERO;
         BigDecimal subtotal = total.add(discount);
 
+        User seller = userRepository.findById(order.getSellerId()).orElse(null);
+        String sellerBizName = seller != null && StringUtils.hasText(seller.getBusinessName())
+                ? seller.getBusinessName()
+                : (seller != null ? seller.getName() : "Wholesale Garments Hub");
+        String sellerGst = seller != null && StringUtils.hasText(seller.getGstNumber())
+                ? seller.getGstNumber() : "09AAACH7409R1ZP";
+        String sellerPhone = seller != null && StringUtils.hasText(seller.getBusinessPhone())
+                ? seller.getBusinessPhone() : "";
+        String sellerAddress = seller != null && StringUtils.hasText(seller.getBusinessAddress())
+                ? seller.getBusinessAddress() : "Main Wholesale Market, Uttar Pradesh";
+
         return OrderResponseDto.builder()
                 .id(order.getId())
                 .sellerId(order.getSellerId())
+                .sellerBusinessName(sellerBizName)
+                .sellerGstNumber(sellerGst)
+                .sellerPhone(sellerPhone)
+                .sellerAddress(sellerAddress)
                 .customerId(order.getCustomer().getId())
                 .customerName(order.getCustomer().getName())
                 .customerMobile(order.getCustomer().getMobile())
@@ -467,7 +563,9 @@ public class OrderService {
                 .deliveryAddress(order.getDeliveryAddress())
                 .subtotalAmount(subtotal)
                 .discountAmount(discount)
+                .taxAmount(order.getTaxAmount() != null ? order.getTaxAmount() : BigDecimal.ZERO)
                 .totalAmount(total)
+                .returnedAmount(order.getReturnedAmount() != null ? order.getReturnedAmount() : BigDecimal.ZERO)
                 .paidAmount(order.getPaidAmount() != null ? order.getPaidAmount() : BigDecimal.ZERO)
                 .paymentStatus(order.getPaymentStatus() != null ? order.getPaymentStatus().name() : PaymentStatus.UNPAID.name())
                 .sellerRemarks(order.getSellerRemarks())

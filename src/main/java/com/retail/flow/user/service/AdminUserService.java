@@ -67,6 +67,10 @@ public class AdminUserService {
                 .email(user.getEmail())
                 .role(user.getRole().name())
                 .active(user.getActive())
+                .businessName(user.getBusinessName())
+                .gstNumber(user.getGstNumber())
+                .businessPhone(user.getBusinessPhone())
+                .businessAddress(user.getBusinessAddress())
                 .build();
     }
 }

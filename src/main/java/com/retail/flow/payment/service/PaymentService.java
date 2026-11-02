@@ -2,6 +2,7 @@ package com.retail.flow.payment.service;
 
 import com.retail.flow.common.exception.BusinessValidationException;
 import com.retail.flow.common.exception.ResourceNotFoundException;
+import com.retail.flow.common.security.CurrentUserService;
 import com.retail.flow.customer.entity.Customer;
 import com.retail.flow.customer.repository.CustomerRepository;
 import com.retail.flow.order.entity.Order;
@@ -15,7 +16,6 @@ import com.retail.flow.payment.repository.PaymentRepository;
 import com.retail.flow.sale.entity.Sale;
 import com.retail.flow.sale.repository.SaleRepository;
 import com.retail.flow.user.entity.User;
-import com.retail.flow.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
@@ -34,11 +34,11 @@ public class PaymentService {
     private final CustomerRepository customerRepository;
     private final SaleRepository saleRepository;
     private final OrderRepository orderRepository;
-    private final UserRepository userRepository;
+    private final CurrentUserService currentUserService;
 
     @Transactional
     public PaymentResponseDto recordPayment(PaymentRequestDto requestDto, String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
+        User caller = currentUserService.getCurrentUser(callerEmail);
 
         Customer customer = customerRepository.findById(requestDto.getCustomerId())
                 .orElseThrow(() -> new ResourceNotFoundException("Customer not found with id: " + requestDto.getCustomerId()));
@@ -65,16 +65,18 @@ public class PaymentService {
                 }
 
                 BigDecimal currentPaid = sale.getPaidAmount() != null ? sale.getPaidAmount() : BigDecimal.ZERO;
-                BigDecimal remainingBalance = sale.getTotalAmount().subtract(currentPaid);
+                BigDecimal returned = sale.getReturnedAmount() != null ? sale.getReturnedAmount() : BigDecimal.ZERO;
+                BigDecimal netPayable = sale.getTotalAmount().subtract(returned).max(BigDecimal.ZERO);
+                BigDecimal remainingBalance = netPayable.subtract(currentPaid).max(BigDecimal.ZERO);
 
                 if (requestDto.getAmount().compareTo(remainingBalance) > 0) {
-                    throw new BusinessValidationException("Payment amount (" + requestDto.getAmount()
-                            + ") exceeds remaining unpaid balance (" + remainingBalance + ") for Sale " + sale.getSaleNumber());
+                    throw new BusinessValidationException("Payment amount (₹" + requestDto.getAmount()
+                            + ") exceeds remaining unpaid balance (₹" + remainingBalance + ") for Sale " + sale.getSaleNumber());
                 }
 
                 BigDecimal updatedPaid = currentPaid.add(requestDto.getAmount());
                 sale.setPaidAmount(updatedPaid);
-                sale.setPaymentStatus(updatedPaid.compareTo(sale.getTotalAmount()) >= 0
+                sale.setPaymentStatus(updatedPaid.compareTo(netPayable) >= 0
                         ? PaymentStatus.PAID
                         : PaymentStatus.PARTIALLY_PAID);
                 saleRepository.save(sale);
@@ -94,16 +96,18 @@ public class PaymentService {
                 }
 
                 BigDecimal currentPaid = order.getPaidAmount() != null ? order.getPaidAmount() : BigDecimal.ZERO;
-                BigDecimal remainingBalance = order.getTotalAmount().subtract(currentPaid);
+                BigDecimal returned = order.getReturnedAmount() != null ? order.getReturnedAmount() : BigDecimal.ZERO;
+                BigDecimal netPayable = order.getTotalAmount().subtract(returned).max(BigDecimal.ZERO);
+                BigDecimal remainingBalance = netPayable.subtract(currentPaid).max(BigDecimal.ZERO);
 
                 if (requestDto.getAmount().compareTo(remainingBalance) > 0) {
-                    throw new BusinessValidationException("Payment amount (" + requestDto.getAmount()
-                            + ") exceeds remaining unpaid balance (" + remainingBalance + ") for Order #" + order.getId());
+                    throw new BusinessValidationException("Payment amount (₹" + requestDto.getAmount()
+                            + ") exceeds remaining unpaid balance (₹" + remainingBalance + ") for Order #" + order.getId());
                 }
 
                 BigDecimal updatedPaid = currentPaid.add(requestDto.getAmount());
                 order.setPaidAmount(updatedPaid);
-                order.setPaymentStatus(updatedPaid.compareTo(order.getTotalAmount()) >= 0
+                order.setPaymentStatus(updatedPaid.compareTo(netPayable) >= 0
                         ? PaymentStatus.PAID
                         : PaymentStatus.PARTIALLY_PAID);
                 orderRepository.save(order);
@@ -130,7 +134,7 @@ public class PaymentService {
 
     @Transactional(readOnly = true)
     public List<PaymentResponseDto> getAllPayments(String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
+        User caller = currentUserService.getCurrentUser(callerEmail);
         List<Payment> payments = (caller.getRole() == User.Role.ADMIN)
                 ? paymentRepository.findAll()
                 : paymentRepository.findBySellerId(caller.getId());
@@ -138,11 +142,6 @@ public class PaymentService {
         return payments.stream()
                 .map(this::mapToResponseDto)
                 .collect(Collectors.toList());
-    }
-
-    private User getUserByEmail(String email) {
-        return userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
     }
 
     private PaymentResponseDto mapToResponseDto(Payment payment) {

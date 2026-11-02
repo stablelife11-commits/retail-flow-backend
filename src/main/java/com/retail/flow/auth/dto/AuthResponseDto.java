@@ -12,4 +12,8 @@ public class AuthResponseDto {
     private String name;
     private String role;
     private Long customerId;
+    private String businessName;
+    private String gstNumber;
+    private String businessPhone;
+    private String businessAddress;
 }

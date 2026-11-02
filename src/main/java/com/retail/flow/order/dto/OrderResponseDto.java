@@ -12,12 +12,18 @@ import java.util.List;
 public class OrderResponseDto {
     private Long id;
     private Long sellerId;
+    private String sellerBusinessName;
+    private String sellerGstNumber;
+    private String sellerPhone;
+    private String sellerAddress;
     private Long customerId;
     private String customerName;
     private String customerMobile;
     private BigDecimal subtotalAmount;
     private BigDecimal discountAmount;
+    private BigDecimal taxAmount;
     private BigDecimal totalAmount;
+    private BigDecimal returnedAmount;
     private BigDecimal paidAmount;
     private String paymentStatus;
     private String sellerRemarks;
@@ -36,6 +42,9 @@ public class OrderResponseDto {
         private String sku;
         private String size;
         private String color;
+        private String hsnCode;
+        private BigDecimal gstPercentage;
+        private BigDecimal taxAmount;
         private Integer quantity;
         private BigDecimal price;
         private String itemNote;

@@ -27,11 +27,23 @@ public class User {
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    private Role role; // ADMIN, SELLER, BUYER[cite: 1]
+    private Role role; // ADMIN, SELLER, BUYER
 
     @Column(nullable = false)
     @Builder.Default
     private Boolean active = true;
+
+    @Column(name = "business_name", length = 150)
+    private String businessName;
+
+    @Column(name = "gst_number", length = 20)
+    private String gstNumber;
+
+    @Column(name = "business_phone", length = 20)
+    private String businessPhone;
+
+    @Column(name = "business_address", length = 500)
+    private String businessAddress;
 
     public enum Role {
         ADMIN,

@@ -3,6 +3,7 @@ package com.retail.flow.product.service;
 import com.retail.flow.common.dto.PagedResponseDto;
 import com.retail.flow.common.exception.BusinessValidationException;
 import com.retail.flow.common.exception.ResourceNotFoundException;
+import com.retail.flow.common.security.CurrentUserService;
 import com.retail.flow.inventory.entity.InventoryTransaction;
 import com.retail.flow.inventory.repository.InventoryTransactionRepository;
 import com.retail.flow.product.dto.ProductRequestDto;
@@ -38,10 +39,11 @@ public class ProductService {
     private final ProductVariantRepository variantRepository;
     private final InventoryTransactionRepository inventoryTransactionRepository;
     private final UserRepository userRepository;
+    private final CurrentUserService currentUserService;
 
     @Transactional
     public ProductResponseDto createProduct(ProductRequestDto requestDto, String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
+        User caller = currentUserService.getCurrentUser(callerEmail);
 
         Long authoritativeSellerId = (caller.getRole() == User.Role.ADMIN && requestDto.getSellerId() != null)
                 ? requestDto.getSellerId()
@@ -120,7 +122,7 @@ public class ProductService {
 
     @Transactional
     public ProductResponseDto updateProduct(Long productId, ProductRequestDto requestDto, String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
+        User caller = currentUserService.getCurrentUser(callerEmail);
         Product product = productRepository.findById(productId)
                 .orElseThrow(() -> new ResourceNotFoundException("Product not found with id: " + productId));
 
@@ -150,6 +152,7 @@ public class ProductService {
                 .collect(Collectors.toMap(v -> v.getSku().toUpperCase(), v -> v, (a, b) -> a));
 
         Set<String> requestSkus = new HashSet<>();
+        Set<Long> retainedVariantIds = new HashSet<>();
         List<InventoryTransaction> stockAdjustmentLogs = new ArrayList<>();
 
         for (VariantRequestDto vDto : requestDto.getVariants()) {
@@ -170,6 +173,7 @@ public class ProductService {
             }
 
             if (targetVariant != null) {
+                retainedVariantIds.add(targetVariant.getId());
                 if (!targetVariant.getSku().equalsIgnoreCase(normalizedSku)
                         && variantRepository.existsBySellerIdAndSku(sellerId, normalizedSku)) {
                     throw new BusinessValidationException("SKU '" + normalizedSku + "' already exists in your catalog.");
@@ -224,6 +228,23 @@ public class ProductService {
             }
         }
 
+        // Fix F-06: Handle variants omitted from the update request safely without breaking historical Order/Sale FKs
+        for (ProductVariant existingVariant : existingById.values()) {
+            if (!retainedVariantIds.contains(existingVariant.getId()) && existingVariant.getStock() > 0) {
+                int prevStock = existingVariant.getStock();
+                existingVariant.setStock(0);
+                stockAdjustmentLogs.add(InventoryTransaction.builder()
+                        .productVariant(existingVariant)
+                        .type(InventoryTransaction.TransactionType.ADJUSTMENT)
+                        .quantity(prevStock)
+                        .referenceType("VARIANT_REMOVED_ZERO_STOCK")
+                        .referenceId(product.getId())
+                        .previousStock(prevStock)
+                        .newStock(0)
+                        .build());
+            }
+        }
+
         if (requestDto.getImageUrls() != null) {
             if (product.getImages() != null) {
                 product.getImages().clear();
@@ -252,7 +273,7 @@ public class ProductService {
 
     @Transactional
     public ProductResponseDto updateProductStatus(Long productId, boolean active, String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
+        User caller = currentUserService.getCurrentUser(callerEmail);
         Product product = productRepository.findById(productId)
                 .orElseThrow(() -> new ResourceNotFoundException("Product not found with id: " + productId));
 
@@ -274,7 +295,7 @@ public class ProductService {
     @Transactional(readOnly = true)
     public PagedResponseDto<ProductResponseDto> getProductsPaged(
             int page, int size, String keyword, String category, String brand, Long sellerId, String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
+        User caller = currentUserService.getCurrentUser(callerEmail);
         int safePage = Math.max(page, 0);
         int safeSize = Math.min(Math.max(size, 1), 100);
         Pageable pageable = PageRequest.of(safePage, safeSize, Sort.by("id").descending());
@@ -303,7 +324,7 @@ public class ProductService {
 
     @Transactional(readOnly = true)
     public List<ProductResponseDto> getMyProducts(int page, int size, String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
+        User caller = currentUserService.getCurrentUser(callerEmail);
         int safeSize = Math.min(Math.max(size, 1), 100);
         Pageable pageable = PageRequest.of(Math.max(page, 0), safeSize, Sort.by("id").descending());
 
@@ -314,7 +335,7 @@ public class ProductService {
 
     @Transactional(readOnly = true)
     public ProductResponseDto getProductById(Long id, String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
+        User caller = currentUserService.getCurrentUser(callerEmail);
         Product product = productRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Product not found with id: " + id));
 
@@ -337,7 +358,7 @@ public class ProductService {
     @Transactional
     public ProductResponseDto.VariantResponseDto updateVariantStock(
             Long variantId, StockUpdateRequestDto requestDto, String callerEmail) {
-        User caller = getUserByEmail(callerEmail);
+        User caller = currentUserService.getCurrentUser(callerEmail);
         ProductVariant variant = variantRepository.findById(variantId)
                 .orElseThrow(() -> new ResourceNotFoundException("Variant not found with id: " + variantId));
 
@@ -401,11 +422,6 @@ public class ProductService {
             }
             product.setImages(images);
         }
-    }
-
-    private User getUserByEmail(String email) {
-        return userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
     }
 
     private ProductResponseDto mapToResponseDto(Product product, User caller) {

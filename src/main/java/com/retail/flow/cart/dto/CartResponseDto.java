@@ -23,12 +23,17 @@ public class CartResponseDto {
     public static class CartItemResponseDto {
         private Long id;
         private Long productId;
+        private String productCode;
         private String productName;
+        private String brand;
+        private String category;
         private Long sellerId;
         private Long variantId;
         private String sku;
         private String size;
         private String color;
+        private String hsnCode;
+        private BigDecimal gstPercentage;
         private BigDecimal unitPrice;
         private Integer quantity;
         private BigDecimal lineTotal;
@@ -37,5 +42,6 @@ public class CartResponseDto {
         private Integer packSize;
         private Boolean productActive;
         private Boolean inStock;
+        private String itemNote;
     }
 }

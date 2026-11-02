@@ -38,4 +38,15 @@ public class SaleItem {
 
     @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal totalPrice;
+
+    @Column(name = "hsn_code", length = 20)
+    private String hsnCode;
+
+    @Column(name = "gst_percentage", nullable = false, precision = 5, scale = 2, columnDefinition = "DECIMAL(5,2) NOT NULL DEFAULT 0.00")
+    @Builder.Default
+    private BigDecimal gstPercentage = BigDecimal.ZERO;
+
+    @Column(name = "tax_amount", nullable = false, precision = 19, scale = 2, columnDefinition = "DECIMAL(19,2) NOT NULL DEFAULT 0.00")
+    @Builder.Default
+    private BigDecimal taxAmount = BigDecimal.ZERO;
 }

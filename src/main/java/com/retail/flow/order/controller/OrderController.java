@@ -80,4 +80,11 @@ public class OrderController {
         OrderResponseDto response = orderService.updateOrderStatus(id, status, authentication.getName());
         return ResponseEntity.ok(response);
     }
+    @GetMapping("/{id}")
+    public ResponseEntity<OrderResponseDto> getOrderById(
+            @PathVariable Long id,
+            Authentication authentication) {
+        OrderResponseDto order = orderService.getOrderById(id, authentication.getName());
+        return ResponseEntity.ok(order);
+    }
 }

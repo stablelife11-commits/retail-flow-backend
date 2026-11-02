@@ -21,6 +21,7 @@ import com.retail.flow.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -73,13 +74,20 @@ public class CartService {
 
         validateVariantForCart(variant, targetQuantity);
 
+        String cleanNote = StringUtils.hasText(requestDto.getItemNote()) ? requestDto.getItemNote().trim() : null;
+
         if (existingItemOpt.isPresent()) {
-            existingItemOpt.get().setQuantity(targetQuantity);
+            CartItem existing = existingItemOpt.get();
+            existing.setQuantity(targetQuantity);
+            if (cleanNote != null) {
+                existing.setItemNote(cleanNote);
+            }
         } else {
             cart.getItems().add(CartItem.builder()
                     .cart(cart)
                     .productVariant(variant)
                     .quantity(targetQuantity)
+                    .itemNote(cleanNote)
                     .build());
         }
 
@@ -89,7 +97,7 @@ public class CartService {
     }
 
     @Transactional
-    public CartResponseDto updateItemQuantity(Long variantId, Integer quantity, String callerEmail) {
+    public CartResponseDto updateItemQuantity(Long variantId, Integer quantity, String itemNote, String callerEmail) {
         Customer customer = getBuyerCustomer(callerEmail);
         Cart cart = getOrCreateCart(customer);
 
@@ -103,6 +111,9 @@ public class CartService {
         } else {
             validateVariantForCart(cartItem.getProductVariant(), quantity);
             cartItem.setQuantity(quantity);
+            if (itemNote != null) {
+                cartItem.setItemNote(StringUtils.hasText(itemNote) ? itemNote.trim() : null);
+            }
         }
 
         cart.setUpdatedAt(LocalDateTime.now());
@@ -150,6 +161,7 @@ public class CartService {
                     OrderItemRequestDto itemDto = new OrderItemRequestDto();
                     itemDto.setVariantId(ci.getProductVariant().getId());
                     itemDto.setQuantity(ci.getQuantity());
+                    itemDto.setItemNote(ci.getItemNote());
                     return itemDto;
                 })
                 .collect(Collectors.toList());
@@ -158,10 +170,8 @@ public class CartService {
         orderRequest.setDeliveryAddress(checkoutDto.getDeliveryAddress().trim());
         orderRequest.setItems(orderItems);
 
-        // Atomically validates prices/MOQ/stock, splits multi-seller items into separate Orders, and deducts stock
         List<OrderResponseDto> createdOrders = orderService.createMultiSellerOrders(orderRequest, callerEmail);
 
-        // Clear the persistent cart only after order creation succeeds
         cart.getItems().clear();
         cart.setUpdatedAt(LocalDateTime.now());
         cartRepository.save(cart);
@@ -229,12 +239,17 @@ public class CartService {
             itemDtos.add(CartResponseDto.CartItemResponseDto.builder()
                     .id(ci.getId())
                     .productId(variant.getProduct().getId())
+                    .productCode(variant.getProduct().getProductCode())
                     .productName(variant.getProduct().getName())
+                    .brand(variant.getProduct().getBrand())
+                    .category(variant.getProduct().getCategory())
                     .sellerId(variant.getProduct().getSellerId())
                     .variantId(variant.getId())
                     .sku(variant.getSku())
                     .size(variant.getSize())
                     .color(variant.getColor())
+                    .hsnCode(variant.getHsnCode())
+                    .gstPercentage(variant.getGstPercentage())
                     .unitPrice(variant.getSellingPrice())
                     .quantity(ci.getQuantity())
                     .lineTotal(lineTotal)
@@ -243,6 +258,7 @@ public class CartService {
                     .packSize(variant.getPackSize())
                     .productActive(variant.getProduct().getActive())
                     .inStock(variant.getStock() >= ci.getQuantity())
+                    .itemNote(ci.getItemNote())
                     .build());
         }
 

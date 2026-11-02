@@ -1,6 +1,5 @@
 package com.retail.flow.common.config;
 
-import com.retail.flow.product.repository.ProductVariantRepository;
 import com.retail.flow.user.entity.User;
 import com.retail.flow.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -17,7 +16,6 @@ public class DataInitializer implements CommandLineRunner {
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
-    private final ProductVariantRepository productVariantRepository;
 
     @Value("${app.admin.default-email:admin@retailflow.com}")
     private String defaultAdminEmail;
@@ -27,14 +25,6 @@ public class DataInitializer implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
-        try {
-            productVariantRepository.fixNullVersions();
-            productVariantRepository.backfillNullSellerIds();
-            log.info("Database Versioning and Variant Seller IDs Synchronized Successfully");
-        } catch (Exception e) {
-            log.warn("Startup data backfill skipped: {}", e.getMessage());
-        }
-
         if (!userRepository.existsByRole(User.Role.ADMIN)) {
             User admin = User.builder()
                     .name("System Administrator")

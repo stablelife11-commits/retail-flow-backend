@@ -17,6 +17,7 @@ import java.util.List;
                 @Index(name = "idx_products_brand", columnList = "brand"),
                 @Index(name = "idx_products_active", columnList = "active")
         })
+@BatchSize(size = 50)
 @Getter
 @Setter
 @NoArgsConstructor

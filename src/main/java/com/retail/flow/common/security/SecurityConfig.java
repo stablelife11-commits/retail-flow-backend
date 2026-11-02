@@ -74,9 +74,11 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/api/v1/orders/seller/**").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers(HttpMethod.PUT, "/api/v1/orders/**").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers(HttpMethod.PATCH, "/api/v1/orders/*/status").hasAnyRole("BUYER", "SELLER", "ADMIN")
+                        .requestMatchers(HttpMethod.GET, "/api/v1/orders/*").hasAnyRole("BUYER", "SELLER", "ADMIN")
                         .requestMatchers(HttpMethod.GET, "/api/v1/orders").hasRole("ADMIN")
 
                         // Back-Office ERP Modules
+                        .requestMatchers("/api/v1/inventory/**").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers("/api/v1/customers/**").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers("/api/v1/expenses/**").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers("/api/v1/payments/**").hasAnyRole("SELLER", "ADMIN")

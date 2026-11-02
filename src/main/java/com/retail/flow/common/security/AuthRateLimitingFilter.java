@@ -8,7 +8,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
@@ -20,6 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class AuthRateLimitingFilter extends OncePerRequestFilter {
 
     private static final long WINDOW_MS = 60_000L;
+    private static final int MAX_TRACKED_IPS = 10_000;
 
     @Value("${app.security.auth-rate-limit-per-minute:20}")
     private int maxRequestsPerMinute;
@@ -38,11 +38,12 @@ public class AuthRateLimitingFilter extends OncePerRequestFilter {
             HttpServletResponse response,
             FilterChain filterChain) throws ServletException, IOException {
 
-        String clientIp = resolveClientIp(request);
+        // Relies on server.forward-headers-strategy=native so only trusted proxies can set remoteAddr
+        String clientIp = request.getRemoteAddr() != null ? request.getRemoteAddr() : "unknown";
         long now = System.currentTimeMillis();
 
-        // Periodically evict stale entries to keep memory bounded
-        if (ipWindows.size() > 5000) {
+        // Evict only expired windows so active brute-force counters cannot be flushed by attackers
+        if (ipWindows.size() > MAX_TRACKED_IPS) {
             ipWindows.entrySet().removeIf(entry -> (now - entry.getValue().windowStartMs) > WINDOW_MS);
         }
 
@@ -64,14 +65,6 @@ public class AuthRateLimitingFilter extends OncePerRequestFilter {
         }
 
         filterChain.doFilter(request, response);
-    }
-
-    private String resolveClientIp(HttpServletRequest request) {
-        String xff = request.getHeader("X-Forwarded-For");
-        if (StringUtils.hasText(xff)) {
-            return xff.split(",")[0].trim();
-        }
-        return request.getRemoteAddr();
     }
 
     private record RateWindow(long windowStartMs, AtomicInteger counter) {}

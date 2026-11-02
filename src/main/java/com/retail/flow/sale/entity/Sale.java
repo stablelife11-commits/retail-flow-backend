@@ -44,6 +44,14 @@ public class Sale {
     @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal totalAmount;
 
+    @Column(name = "tax_amount", nullable = false, precision = 19, scale = 2, columnDefinition = "DECIMAL(19,2) NOT NULL DEFAULT 0.00")
+    @Builder.Default
+    private BigDecimal taxAmount = BigDecimal.ZERO;
+
+    @Column(name = "returned_amount", nullable = false, precision = 19, scale = 2, columnDefinition = "DECIMAL(19,2) NOT NULL DEFAULT 0.00")
+    @Builder.Default
+    private BigDecimal returnedAmount = BigDecimal.ZERO;
+
     @Column(name = "paid_amount", nullable = false, precision = 19, scale = 2, columnDefinition = "DECIMAL(19,2) NOT NULL DEFAULT 0.00")
     @Builder.Default
     private BigDecimal paidAmount = BigDecimal.ZERO;
@@ -59,6 +67,12 @@ public class Sale {
 
     @PrePersist
     public void prePersist() {
+        if (this.taxAmount == null) {
+            this.taxAmount = BigDecimal.ZERO;
+        }
+        if (this.returnedAmount == null) {
+            this.returnedAmount = BigDecimal.ZERO;
+        }
         if (this.paidAmount == null) {
             this.paidAmount = BigDecimal.ZERO;
         }

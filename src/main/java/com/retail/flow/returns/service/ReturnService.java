@@ -2,10 +2,12 @@ package com.retail.flow.returns.service;
 
 import com.retail.flow.common.exception.BusinessValidationException;
 import com.retail.flow.common.exception.ResourceNotFoundException;
+import com.retail.flow.common.security.CurrentUserService;
 import com.retail.flow.inventory.entity.InventoryTransaction;
 import com.retail.flow.inventory.repository.InventoryTransactionRepository;
 import com.retail.flow.order.entity.Order;
 import com.retail.flow.order.entity.Order.OrderStatus;
+import com.retail.flow.order.entity.Order.PaymentStatus;
 import com.retail.flow.order.entity.OrderItem;
 import com.retail.flow.order.repository.OrderRepository;
 import com.retail.flow.product.entity.ProductVariant;
@@ -19,7 +21,6 @@ import com.retail.flow.sale.entity.Sale;
 import com.retail.flow.sale.entity.SaleItem;
 import com.retail.flow.sale.repository.SaleRepository;
 import com.retail.flow.user.entity.User;
-import com.retail.flow.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
@@ -39,12 +40,11 @@ public class ReturnService {
     private final SaleRepository saleRepository;
     private final OrderRepository orderRepository;
     private final InventoryTransactionRepository inventoryTransactionRepository;
-    private final UserRepository userRepository;
+    private final CurrentUserService currentUserService;
 
     @Transactional
     public ReturnResponseDto processReturn(ReturnRequestDto requestDto, String callerEmail) {
-        User caller = userRepository.findByEmail(callerEmail)
-                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
+        User caller = currentUserService.getCurrentUser(callerEmail);
 
         boolean hasSaleId = requestDto.getSaleId() != null;
         boolean hasOrderId = requestDto.getOrderId() != null;
@@ -58,43 +58,45 @@ public class ReturnService {
         Map<Long, BigDecimal> unitPriceByVariant = new HashMap<>();
         List<SaleReturn> previousReturns;
         String auditReferenceType;
+        Sale targetSale = null;
+        Order targetOrder = null;
 
         if (hasSaleId) {
-            Sale sale = saleRepository.findById(requestDto.getSaleId())
+            targetSale = saleRepository.findById(requestDto.getSaleId())
                     .orElseThrow(() -> new ResourceNotFoundException("Sale not found with id: " + requestDto.getSaleId()));
 
-            if (caller.getRole() != User.Role.ADMIN && !sale.getSellerId().equals(caller.getId())) {
+            if (caller.getRole() != User.Role.ADMIN && !targetSale.getSellerId().equals(caller.getId())) {
                 throw new AccessDeniedException("You are not authorized to process returns for another seller's sale.");
             }
 
-            authoritativeSellerId = sale.getSellerId();
-            for (SaleItem si : sale.getSaleItems()) {
+            authoritativeSellerId = targetSale.getSellerId();
+            for (SaleItem si : targetSale.getSaleItems()) {
                 Long vId = si.getProductVariant().getId();
                 purchasedQuantityByVariant.merge(vId, si.getQuantity(), Integer::sum);
                 unitPriceByVariant.put(vId, si.getUnitPrice());
             }
-            previousReturns = returnRepository.findBySaleId(sale.getId());
+            previousReturns = returnRepository.findBySaleId(targetSale.getId());
             auditReferenceType = "SALE_RETURN";
         } else {
-            Order order = orderRepository.findById(requestDto.getOrderId())
+            targetOrder = orderRepository.findById(requestDto.getOrderId())
                     .orElseThrow(() -> new ResourceNotFoundException("Order not found with id: " + requestDto.getOrderId()));
 
-            if (caller.getRole() != User.Role.ADMIN && !order.getSellerId().equals(caller.getId())) {
+            if (caller.getRole() != User.Role.ADMIN && !targetOrder.getSellerId().equals(caller.getId())) {
                 throw new AccessDeniedException("You are not authorized to process returns for another seller's order.");
             }
 
-            if (order.getStatus() != OrderStatus.DELIVERED) {
+            if (targetOrder.getStatus() != OrderStatus.DELIVERED) {
                 throw new BusinessValidationException("Returns can only be processed for DELIVERED orders (Current status: "
-                        + order.getStatus() + "). Use order cancellation/rejection for undelivered orders.");
+                        + targetOrder.getStatus() + "). Use order cancellation/rejection for undelivered orders.");
             }
 
-            authoritativeSellerId = order.getSellerId();
-            for (OrderItem oi : order.getOrderItems()) {
+            authoritativeSellerId = targetOrder.getSellerId();
+            for (OrderItem oi : targetOrder.getOrderItems()) {
                 Long vId = oi.getProductVariant().getId();
                 purchasedQuantityByVariant.merge(vId, oi.getQuantity(), Integer::sum);
                 unitPriceByVariant.put(vId, oi.getPrice());
             }
-            previousReturns = returnRepository.findByOrderId(order.getId());
+            previousReturns = returnRepository.findByOrderId(targetOrder.getId());
             auditReferenceType = "ORDER_RETURN";
         }
 
@@ -180,6 +182,37 @@ public class ReturnService {
         saleReturn.setTotalReturnAmount(totalReturnAmount);
         SaleReturn savedReturn = returnRepository.save(saleReturn);
 
+        // Fix F-04: Adjust receivable balance and paymentStatus on the parent Sale or Order
+        if (targetSale != null) {
+            BigDecimal currentReturned = targetSale.getReturnedAmount() != null ? targetSale.getReturnedAmount() : BigDecimal.ZERO;
+            BigDecimal updatedReturned = currentReturned.add(totalReturnAmount);
+            targetSale.setReturnedAmount(updatedReturned);
+
+            BigDecimal netPayable = targetSale.getTotalAmount().subtract(updatedReturned).max(BigDecimal.ZERO);
+            BigDecimal paid = targetSale.getPaidAmount() != null ? targetSale.getPaidAmount() : BigDecimal.ZERO;
+
+            if (paid.compareTo(BigDecimal.ZERO) > 0 && paid.compareTo(netPayable) >= 0) {
+                targetSale.setPaymentStatus(PaymentStatus.PAID);
+            } else if (paid.compareTo(BigDecimal.ZERO) > 0) {
+                targetSale.setPaymentStatus(PaymentStatus.PARTIALLY_PAID);
+            }
+            saleRepository.save(targetSale);
+        } else if (targetOrder != null) {
+            BigDecimal currentReturned = targetOrder.getReturnedAmount() != null ? targetOrder.getReturnedAmount() : BigDecimal.ZERO;
+            BigDecimal updatedReturned = currentReturned.add(totalReturnAmount);
+            targetOrder.setReturnedAmount(updatedReturned);
+
+            BigDecimal netPayable = targetOrder.getTotalAmount().subtract(updatedReturned).max(BigDecimal.ZERO);
+            BigDecimal paid = targetOrder.getPaidAmount() != null ? targetOrder.getPaidAmount() : BigDecimal.ZERO;
+
+            if (paid.compareTo(BigDecimal.ZERO) > 0 && paid.compareTo(netPayable) >= 0) {
+                targetOrder.setPaymentStatus(PaymentStatus.PAID);
+            } else if (paid.compareTo(BigDecimal.ZERO) > 0) {
+                targetOrder.setPaymentStatus(PaymentStatus.PARTIALLY_PAID);
+            }
+            orderRepository.save(targetOrder);
+        }
+
         for (InventoryTransaction tx : pendingAuditLogs) {
             tx.setReferenceId(savedReturn.getId());
         }
@@ -190,8 +223,7 @@ public class ReturnService {
 
     @Transactional(readOnly = true)
     public List<ReturnResponseDto> getAllReturns(String callerEmail) {
-        User caller = userRepository.findByEmail(callerEmail)
-                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found"));
+        User caller = currentUserService.getCurrentUser(callerEmail);
 
         List<SaleReturn> returns = (caller.getRole() == User.Role.ADMIN)
                 ? returnRepository.findAll()

@@ -11,4 +11,8 @@ public class UserResponseDto {
     private String email;
     private String role;
     private Boolean active;
+    private String businessName;
+    private String gstNumber;
+    private String businessPhone;
+    private String businessAddress;
 }

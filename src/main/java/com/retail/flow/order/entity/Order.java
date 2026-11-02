@@ -45,6 +45,14 @@ public class Order {
     @Builder.Default
     private BigDecimal discountAmount = BigDecimal.ZERO;
 
+    @Column(name = "tax_amount", nullable = false, precision = 19, scale = 2, columnDefinition = "DECIMAL(19,2) NOT NULL DEFAULT 0.00")
+    @Builder.Default
+    private BigDecimal taxAmount = BigDecimal.ZERO;
+
+    @Column(name = "returned_amount", nullable = false, precision = 19, scale = 2, columnDefinition = "DECIMAL(19,2) NOT NULL DEFAULT 0.00")
+    @Builder.Default
+    private BigDecimal returnedAmount = BigDecimal.ZERO;
+
     @Column(name = "seller_remarks", length = 500)
     private String sellerRemarks;
 
@@ -77,6 +85,12 @@ public class Order {
         }
         if (this.discountAmount == null) {
             this.discountAmount = BigDecimal.ZERO;
+        }
+        if (this.taxAmount == null) {
+            this.taxAmount = BigDecimal.ZERO;
+        }
+        if (this.returnedAmount == null) {
+            this.returnedAmount = BigDecimal.ZERO;
         }
         if (this.paidAmount == null) {
             this.paidAmount = BigDecimal.ZERO;

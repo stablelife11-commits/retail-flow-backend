@@ -15,7 +15,9 @@ public class SaleResponseDto {
     private Long customerId;
     private String customerName;
     private LocalDate saleDate;
+    private BigDecimal taxAmount;
     private BigDecimal totalAmount;
+    private BigDecimal returnedAmount;
     private BigDecimal paidAmount;
     private String paymentStatus;
     private List<SaleItemResponseDto> items;
@@ -26,6 +28,9 @@ public class SaleResponseDto {
         private Long id;
         private Long variantId;
         private String sku;
+        private String hsnCode;
+        private BigDecimal gstPercentage;
+        private BigDecimal taxAmount;
         private Integer quantity;
         private BigDecimal unitPrice;
         private BigDecimal totalPrice;

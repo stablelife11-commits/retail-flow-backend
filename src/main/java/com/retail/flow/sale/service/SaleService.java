@@ -26,6 +26,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -33,6 +34,8 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class SaleService {
+
+    private static final BigDecimal HUNDRED = new BigDecimal("100");
 
     private final SaleRepository saleRepository;
     private final CustomerRepository customerRepository;
@@ -59,11 +62,14 @@ public class SaleService {
                 .saleDate(requestDto.getSaleDate())
                 .saleItems(new ArrayList<>())
                 .totalAmount(BigDecimal.ZERO)
+                .taxAmount(BigDecimal.ZERO)
+                .returnedAmount(BigDecimal.ZERO)
                 .paidAmount(BigDecimal.ZERO)
                 .paymentStatus(PaymentStatus.UNPAID)
                 .build();
 
         BigDecimal totalAmount = BigDecimal.ZERO;
+        BigDecimal totalTaxAmount = BigDecimal.ZERO;
         List<InventoryTransaction> pendingTransactions = new ArrayList<>();
 
         for (var itemDto : requestDto.getItems()) {
@@ -86,7 +92,13 @@ public class SaleService {
 
             BigDecimal unitPrice = variant.getSellingPrice();
             BigDecimal itemTotal = unitPrice.multiply(BigDecimal.valueOf(itemDto.getQuantity()));
+            BigDecimal gstPct = variant.getGstPercentage() != null ? variant.getGstPercentage() : BigDecimal.ZERO;
+            BigDecimal itemTax = (gstPct.compareTo(BigDecimal.ZERO) > 0)
+                    ? itemTotal.multiply(gstPct).divide(HUNDRED.add(gstPct), 2, RoundingMode.HALF_UP)
+                    : BigDecimal.ZERO;
+
             totalAmount = totalAmount.add(itemTotal);
+            totalTaxAmount = totalTaxAmount.add(itemTax);
 
             SaleItem saleItem = SaleItem.builder()
                     .sale(sale)
@@ -94,6 +106,9 @@ public class SaleService {
                     .quantity(itemDto.getQuantity())
                     .unitPrice(unitPrice)
                     .totalPrice(itemTotal)
+                    .hsnCode(variant.getHsnCode())
+                    .gstPercentage(gstPct)
+                    .taxAmount(itemTax)
                     .build();
 
             sale.getSaleItems().add(saleItem);
@@ -109,6 +124,7 @@ public class SaleService {
         }
 
         sale.setTotalAmount(totalAmount);
+        sale.setTaxAmount(totalTaxAmount);
         Sale savedSale = saleRepository.save(sale);
 
         for (InventoryTransaction tx : pendingTransactions) {
@@ -139,6 +155,9 @@ public class SaleService {
                         .id(item.getId())
                         .variantId(item.getProductVariant().getId())
                         .sku(item.getProductVariant().getSku())
+                        .hsnCode(item.getHsnCode() != null ? item.getHsnCode() : item.getProductVariant().getHsnCode())
+                        .gstPercentage(item.getGstPercentage() != null ? item.getGstPercentage() : BigDecimal.ZERO)
+                        .taxAmount(item.getTaxAmount() != null ? item.getTaxAmount() : BigDecimal.ZERO)
                         .quantity(item.getQuantity())
                         .unitPrice(item.getUnitPrice())
                         .totalPrice(item.getTotalPrice())
@@ -151,7 +170,9 @@ public class SaleService {
                 .customerId(sale.getCustomer().getId())
                 .customerName(sale.getCustomer().getName())
                 .saleDate(sale.getSaleDate())
+                .taxAmount(sale.getTaxAmount() != null ? sale.getTaxAmount() : BigDecimal.ZERO)
                 .totalAmount(sale.getTotalAmount())
+                .returnedAmount(sale.getReturnedAmount() != null ? sale.getReturnedAmount() : BigDecimal.ZERO)
                 .paidAmount(sale.getPaidAmount() != null ? sale.getPaidAmount() : BigDecimal.ZERO)
                 .paymentStatus(sale.getPaymentStatus() != null ? sale.getPaymentStatus().name() : PaymentStatus.UNPAID.name())
                 .items(itemDtos)
