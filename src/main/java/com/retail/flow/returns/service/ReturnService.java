@@ -90,11 +90,22 @@ public class ReturnService {
                         + targetOrder.getStatus() + "). Use order cancellation/rejection for undelivered orders.");
             }
 
+            // Inside processReturn() for online orders (lines 85-100):
             authoritativeSellerId = targetOrder.getSellerId();
+            BigDecimal discount = targetOrder.getDiscountAmount() != null ? targetOrder.getDiscountAmount() : BigDecimal.ZERO;
+            BigDecimal netOrderTotal = targetOrder.getTotalAmount() != null ? targetOrder.getTotalAmount() : BigDecimal.ZERO;
+            BigDecimal grossSubtotal = netOrderTotal.add(discount);
+
             for (OrderItem oi : targetOrder.getOrderItems()) {
                 Long vId = oi.getProductVariant().getId();
                 purchasedQuantityByVariant.merge(vId, oi.getQuantity(), Integer::sum);
-                unitPriceByVariant.put(vId, oi.getPrice());
+
+                BigDecimal effectiveUnitPrice = oi.getPrice();
+                if (discount.compareTo(BigDecimal.ZERO) > 0 && grossSubtotal.compareTo(BigDecimal.ZERO) > 0) {
+                    effectiveUnitPrice = oi.getPrice().multiply(netOrderTotal)
+                            .divide(grossSubtotal, 2, java.math.RoundingMode.HALF_UP);
+                }
+                unitPriceByVariant.put(vId, effectiveUnitPrice);
             }
             previousReturns = returnRepository.findByOrderId(targetOrder.getId());
             auditReferenceType = "ORDER_RETURN";
@@ -197,9 +208,10 @@ public class ReturnService {
                 targetSale.setPaymentStatus(PaymentStatus.PARTIALLY_PAID);
             }
             saleRepository.save(targetSale);
+            // Inside processReturn() when updating targetOrder.returnedAmount (lines 165-185):
         } else if (targetOrder != null) {
             BigDecimal currentReturned = targetOrder.getReturnedAmount() != null ? targetOrder.getReturnedAmount() : BigDecimal.ZERO;
-            BigDecimal updatedReturned = currentReturned.add(totalReturnAmount);
+            BigDecimal updatedReturned = currentReturned.add(totalReturnAmount).min(targetOrder.getTotalAmount());
             targetOrder.setReturnedAmount(updatedReturned);
 
             BigDecimal netPayable = targetOrder.getTotalAmount().subtract(updatedReturned).max(BigDecimal.ZERO);

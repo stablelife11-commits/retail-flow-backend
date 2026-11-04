@@ -12,9 +12,15 @@ import java.util.Optional;
 @Repository
 public interface CustomerRepository extends JpaRepository<Customer, Long> {
 
-    // Platform Buyer lookups (where sellerId IS NULL)
-    @Query("SELECT c FROM Customer c WHERE c.email = :email AND c.sellerId IS NULL")
-    Optional<Customer> findByEmail(@Param("email") String email);
+    // Safe single-row lookup for Platform Buyers (where sellerId IS NULL)
+    Optional<Customer> findFirstByEmailIgnoreCaseAndSellerIdIsNullOrderByIdAsc(String email);
+
+    default Optional<Customer> findByEmail(String email) {
+        if (email == null) {
+            return Optional.empty();
+        }
+        return findFirstByEmailIgnoreCaseAndSellerIdIsNullOrderByIdAsc(email.trim());
+    }
 
     boolean existsBySellerIdIsNullAndMobile(String mobile);
 

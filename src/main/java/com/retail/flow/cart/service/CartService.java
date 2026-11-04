@@ -236,6 +236,11 @@ public class CartService {
             totalQty += ci.getQuantity();
             estimatedTotal = estimatedTotal.add(lineTotal);
 
+            String primaryImageUrl = null;
+            if (variant.getProduct().getImages() != null && !variant.getProduct().getImages().isEmpty()) {
+                primaryImageUrl = variant.getProduct().getImages().get(0).getImageUrl();
+            }
+
             itemDtos.add(CartResponseDto.CartItemResponseDto.builder()
                     .id(ci.getId())
                     .productId(variant.getProduct().getId())
@@ -244,6 +249,7 @@ public class CartService {
                     .brand(variant.getProduct().getBrand())
                     .category(variant.getProduct().getCategory())
                     .sellerId(variant.getProduct().getSellerId())
+                    .primaryImageUrl(primaryImageUrl)
                     .variantId(variant.getId())
                     .sku(variant.getSku())
                     .size(variant.getSize())

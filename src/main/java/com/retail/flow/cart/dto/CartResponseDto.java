@@ -28,6 +28,7 @@ public class CartResponseDto {
         private String brand;
         private String category;
         private Long sellerId;
+        private String primaryImageUrl;
         private Long variantId;
         private String sku;
         private String size;

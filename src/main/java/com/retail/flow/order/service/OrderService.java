@@ -345,6 +345,12 @@ public class OrderService {
                     "Modified order total (₹" + finalTotal + ") cannot be less than the amount already paid by the buyer (₹" + paid + ").");
         }
 
+        BigDecimal adjustedTaxAmount = totalTaxAmount;
+        if (discount.compareTo(BigDecimal.ZERO) > 0 && subtotal.compareTo(BigDecimal.ZERO) > 0) {
+            adjustedTaxAmount = totalTaxAmount.multiply(finalTotal)
+                    .divide(subtotal, 2, RoundingMode.HALF_UP);
+        }
+
         order.setDiscountAmount(discount);
         order.setTaxAmount(totalTaxAmount);
         order.setSellerRemarks(StringUtils.hasText(requestDto.getSellerRemarks())
