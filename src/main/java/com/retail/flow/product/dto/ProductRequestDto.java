@@ -13,7 +13,7 @@ public class ProductRequestDto {
     @NotNull(message = "Seller ID is required")
     private Long sellerId;
 
-    @NotBlank(message = "Product code is required")
+    // Optional: Agar blank bhejenge to backend Smart Product Code auto-generate kar dega
     private String productCode;
 
     @NotBlank(message = "Product name is required")

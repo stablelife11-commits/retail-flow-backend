@@ -40,6 +40,7 @@ public class ProductService {
     private final InventoryTransactionRepository inventoryTransactionRepository;
     private final UserRepository userRepository;
     private final CurrentUserService currentUserService;
+    private final SkuGeneratorService skuGeneratorService;
 
     @Transactional
     public ProductResponseDto createProduct(ProductRequestDto requestDto, String callerEmail) {
@@ -49,22 +50,50 @@ public class ProductService {
                 ? requestDto.getSellerId()
                 : caller.getId();
 
-        String trimmedProductCode = requestDto.getProductCode().trim();
-
-        productRepository.findBySellerIdAndProductCode(authoritativeSellerId, trimmedProductCode)
-                .ifPresent(p -> {
-                    throw new BusinessValidationException("Product code '" + trimmedProductCode + "' already exists in your catalog.");
-                });
+        // Auto-generate Product Code if left blank, or validate manual Product Code
+        String trimmedProductCode;
+        if (StringUtils.hasText(requestDto.getProductCode())) {
+            trimmedProductCode = requestDto.getProductCode().trim().toUpperCase();
+            productRepository.findBySellerIdAndProductCode(authoritativeSellerId, trimmedProductCode)
+                    .ifPresent(p -> {
+                        throw new BusinessValidationException("Product code '" + trimmedProductCode + "' already exists in your catalog.");
+                    });
+        } else {
+            trimmedProductCode = skuGeneratorService.generateUniqueProductCode(
+                    authoritativeSellerId,
+                    requestDto.getBrand(),
+                    requestDto.getCategory(),
+                    requestDto.getName()
+            );
+        }
 
         Set<String> requestSkus = new HashSet<>();
         for (VariantRequestDto vDto : requestDto.getVariants()) {
-            String normalizedSku = vDto.getSku().trim();
-            if (!requestSkus.add(normalizedSku.toUpperCase())) {
-                throw new BusinessValidationException("Duplicate SKU '" + normalizedSku + "' found in the same product request.");
+            String normalizedSize = skuGeneratorService.normalizeSize(vDto.getSize());
+            vDto.setSize(normalizedSize);
+
+            String resolvedSku;
+            if (StringUtils.hasText(vDto.getSku())) {
+                resolvedSku = vDto.getSku().trim().toUpperCase().replaceAll("\\s+", "-");
+                if (!requestSkus.add(resolvedSku)) {
+                    throw new BusinessValidationException("Duplicate SKU '" + resolvedSku + "' found in the same product request.");
+                }
+                if (variantRepository.existsBySellerIdAndSku(authoritativeSellerId, resolvedSku)) {
+                    throw new BusinessValidationException("SKU '" + resolvedSku + "' already exists in your catalog.");
+                }
+            } else {
+                resolvedSku = skuGeneratorService.generateBestWholesaleSku(
+                        authoritativeSellerId,
+                        requestDto.getBrand(),
+                        requestDto.getCategory(),
+                        requestDto.getName(),
+                        vDto.getColor(),
+                        normalizedSize,
+                        requestSkus
+                );
             }
-            if (variantRepository.existsBySellerIdAndSku(authoritativeSellerId, normalizedSku)) {
-                throw new BusinessValidationException("SKU '" + normalizedSku + "' already exists in your catalog.");
-            }
+
+            vDto.setSku(resolvedSku);
             validateMoqAndPackSize(vDto);
         }
 
@@ -82,9 +111,9 @@ public class ProductService {
                 .map(vDto -> ProductVariant.builder()
                         .sellerId(authoritativeSellerId)
                         .product(product)
-                        .sku(vDto.getSku().trim())
+                        .sku(vDto.getSku())
                         .size(vDto.getSize())
-                        .color(vDto.getColor())
+                        .color(StringUtils.hasText(vDto.getColor()) ? vDto.getColor().trim() : "Standard")
                         .sellingPrice(vDto.getSellingPrice())
                         .purchasePrice(vDto.getPurchasePrice())
                         .stock(vDto.getStock())
@@ -131,7 +160,9 @@ public class ProductService {
         }
 
         Long sellerId = product.getSellerId();
-        String trimmedProductCode = requestDto.getProductCode().trim();
+        String trimmedProductCode = StringUtils.hasText(requestDto.getProductCode())
+                ? requestDto.getProductCode().trim().toUpperCase()
+                : product.getProductCode();
 
         productRepository.findBySellerIdAndProductCode(sellerId, trimmedProductCode)
                 .ifPresent(existing -> {
@@ -156,11 +187,8 @@ public class ProductService {
         List<InventoryTransaction> stockAdjustmentLogs = new ArrayList<>();
 
         for (VariantRequestDto vDto : requestDto.getVariants()) {
-            validateMoqAndPackSize(vDto);
-            String normalizedSku = vDto.getSku().trim();
-            if (!requestSkus.add(normalizedSku.toUpperCase())) {
-                throw new BusinessValidationException("Duplicate SKU '" + normalizedSku + "' found in the update request.");
-            }
+            String normalizedSize = skuGeneratorService.normalizeSize(vDto.getSize());
+            vDto.setSize(normalizedSize);
 
             ProductVariant targetVariant = null;
             if (vDto.getId() != null) {
@@ -168,9 +196,33 @@ public class ProductService {
                 if (targetVariant == null) {
                     throw new BusinessValidationException("Variant ID " + vDto.getId() + " does not belong to this product.");
                 }
-            } else {
-                targetVariant = existingBySku.get(normalizedSku.toUpperCase());
+            } else if (StringUtils.hasText(vDto.getSku())) {
+                targetVariant = existingBySku.get(vDto.getSku().trim().toUpperCase());
             }
+
+            String normalizedSku;
+            if (StringUtils.hasText(vDto.getSku())) {
+                normalizedSku = vDto.getSku().trim().toUpperCase().replaceAll("\\s+", "-");
+                if (!requestSkus.add(normalizedSku)) {
+                    throw new BusinessValidationException("Duplicate SKU '" + normalizedSku + "' found in the update request.");
+                }
+            } else if (targetVariant != null) {
+                normalizedSku = targetVariant.getSku();
+                requestSkus.add(normalizedSku.toUpperCase());
+            } else {
+                normalizedSku = skuGeneratorService.generateBestWholesaleSku(
+                        sellerId,
+                        requestDto.getBrand(),
+                        requestDto.getCategory(),
+                        requestDto.getName(),
+                        vDto.getColor(),
+                        normalizedSize,
+                        requestSkus
+                );
+            }
+
+            vDto.setSku(normalizedSku);
+            validateMoqAndPackSize(vDto);
 
             if (targetVariant != null) {
                 retainedVariantIds.add(targetVariant.getId());
@@ -183,8 +235,8 @@ public class ProductService {
                 int newStock = vDto.getStock();
 
                 targetVariant.setSku(normalizedSku);
-                targetVariant.setSize(vDto.getSize());
-                targetVariant.setColor(vDto.getColor());
+                targetVariant.setSize(normalizedSize);
+                targetVariant.setColor(StringUtils.hasText(vDto.getColor()) ? vDto.getColor().trim() : "Standard");
                 targetVariant.setSellingPrice(vDto.getSellingPrice());
                 targetVariant.setPurchasePrice(vDto.getPurchasePrice());
                 targetVariant.setStock(newStock);
@@ -213,8 +265,8 @@ public class ProductService {
                         .sellerId(sellerId)
                         .product(product)
                         .sku(normalizedSku)
-                        .size(vDto.getSize())
-                        .color(vDto.getColor())
+                        .size(normalizedSize)
+                        .color(StringUtils.hasText(vDto.getColor()) ? vDto.getColor().trim() : "Standard")
                         .sellingPrice(vDto.getSellingPrice())
                         .purchasePrice(vDto.getPurchasePrice())
                         .stock(vDto.getStock())
