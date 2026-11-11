@@ -51,6 +51,13 @@ public class SecurityConfig {
                 )
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/v1/auth/**").permitAll()
+
+                        // 1. Public: Buyer and Seller apps can check for updates without login
+                        .requestMatchers(HttpMethod.GET, "/api/v1/app-update/check").permitAll()
+
+                        // 2. Strictly ADMIN Only: Only ADMIN can publish a new app update
+                        .requestMatchers(HttpMethod.PUT, "/api/v1/app-update").hasRole("ADMIN")
+
                         .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                         .requestMatchers("/actuator/**").hasRole("ADMIN")
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
