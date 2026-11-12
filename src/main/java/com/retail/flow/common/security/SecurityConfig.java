@@ -94,6 +94,10 @@ public class SecurityConfig {
                         .requestMatchers("/api/v1/reports/**").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers("/api/v1/returns/**").hasAnyRole("SELLER", "ADMIN")
                         .requestMatchers("/api/v1/suppliers/**").hasAnyRole("SELLER", "ADMIN")
+                        // Notifications (Buyers can read their own; ONLY ADMIN can manually send)
+                        .requestMatchers(HttpMethod.GET, "/api/v1/notifications/my").hasAnyRole("BUYER", "ADMIN")
+                        .requestMatchers(HttpMethod.PATCH, "/api/v1/notifications/**").hasAnyRole("BUYER", "ADMIN")
+                        .requestMatchers(HttpMethod.POST, "/api/v1/notifications/send").hasRole("ADMIN")
 
                         .anyRequest().authenticated()
                 );

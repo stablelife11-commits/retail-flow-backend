@@ -55,6 +55,8 @@ public class OrderService {
     private final CurrentUserService currentUserService;
     private final CartRepository cartRepository;
 
+    private final com.retail.flow.notification.repository.BuyerNotificationRepository notificationRepository;
+
     private record SellerLineItem(Long variantId, int quantity) {}
 
     @Transactional
@@ -377,6 +379,23 @@ public class OrderService {
         if (!inventoryLogs.isEmpty()) {
             inventoryTransactionRepository.saveAll(inventoryLogs);
         }
+        // 🟢 2. नया: जब सेलर ऑर्डर का बिल/डिस्काउंट अपडेट या कन्फर्म करे तो ग्राहक को नोटिफिकेशन भेजें
+        String modTitle = (savedOrder.getStatus() == OrderStatus.CONFIRMED)
+                ? "Order #" + savedOrder.getId() + " Confirmed ✅"
+                : "Order #" + savedOrder.getId() + " Updated by Seller 📝";
+        String modMsg = "सेलर ने आपके ऑर्डर #" + savedOrder.getId() + " की समीक्षा कर ली है। कुल देय राशि: ₹" + savedOrder.getTotalAmount()
+                + (discount.compareTo(BigDecimal.ZERO) > 0 ? " (छूट: ₹" + discount + ")" : "");
+        if (StringUtils.hasText(savedOrder.getSellerRemarks())) {
+            modMsg += "\nसेलर नोट: \"" + savedOrder.getSellerRemarks() + "\"";
+        }
+        notificationRepository.save(com.retail.flow.notification.entity.BuyerNotification.builder()
+                .customerId(savedOrder.getCustomer().getId())
+                .senderId(caller.getId())
+                .orderId(savedOrder.getId())
+                .title(modTitle)
+                .message(modMsg)
+                .isRead(false)
+                .build());
 
         return mapToResponseDto(savedOrder);
     }
@@ -424,6 +443,26 @@ public class OrderService {
 
         order.setStatus(targetStatus);
         Order savedOrder = orderRepository.save(order);
+
+        if (caller.getRole() != User.Role.BUYER) {
+            String statusHindi = switch (targetStatus) {
+                case CONFIRMED -> "सेलर द्वारा कन्फर्म (Confirmed) कर दिया गया है ✅";
+                case PROCESSING -> "गोदाम में पैक (Processing) किया जा रहा है 📦";
+                case SHIPPED -> "गोदाम से डिस्पैच (Out for Delivery) हो चुका है 🚚";
+                case DELIVERED -> "आपकी दुकान पर डिलीवर हो गया है 🎉";
+                case CANCELLED, REJECTED -> "कैंसिल/रिजेक्ट कर दिया गया है ❌";
+                default -> targetStatus.name();
+            };
+
+            notificationRepository.save(com.retail.flow.notification.entity.BuyerNotification.builder()
+                    .customerId(savedOrder.getCustomer().getId())
+                    .senderId(caller.getId())
+                    .orderId(savedOrder.getId())
+                    .title("Order #" + savedOrder.getId() + " — " + targetStatus.name())
+                    .message("आपका होलसेल ऑर्डर #" + savedOrder.getId() + " " + statusHindi)
+                    .isRead(false)
+                    .build());
+        }
         return mapToResponseDto(savedOrder);
     }
 
