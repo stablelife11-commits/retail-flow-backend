@@ -41,4 +41,7 @@ public class Customer {
     @Column(nullable = false)
     @Builder.Default
     private Boolean active = true;
+    // 🟢 नया: ग्राहक के फोन का FCM Push Token सेव करने के लिए
+    @Column(name = "fcm_token", length = 512)
+    private String fcmToken;
 }

@@ -56,7 +56,7 @@ public class OrderService {
     private final CartRepository cartRepository;
 
     private final com.retail.flow.notification.repository.BuyerNotificationRepository notificationRepository;
-
+    private final com.retail.flow.notification.service.FcmPushService fcmPushService;
     private record SellerLineItem(Long variantId, int quantity) {}
 
     @Transactional
@@ -396,6 +396,7 @@ public class OrderService {
                 .message(modMsg)
                 .isRead(false)
                 .build());
+        fcmPushService.sendPushToBuyer(savedOrder.getCustomer().getFcmToken(), modTitle, modMsg, savedOrder.getId());
 
         return mapToResponseDto(savedOrder);
     }
@@ -462,6 +463,12 @@ public class OrderService {
                     .message("आपका होलसेल ऑर्डर #" + savedOrder.getId() + " " + statusHindi)
                     .isRead(false)
                     .build());
+            fcmPushService.sendPushToBuyer(
+                    savedOrder.getCustomer().getFcmToken(),
+                    "Order #" + savedOrder.getId() + " — " + targetStatus.name(),
+                    "आपका होलसेल ऑर्डर #" + savedOrder.getId() + " " + statusHindi,
+                    savedOrder.getId()
+            );
         }
         return mapToResponseDto(savedOrder);
     }
