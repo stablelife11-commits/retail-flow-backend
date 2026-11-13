@@ -11,10 +11,10 @@ import com.retail.flow.notification.service.FcmPushService;
 import com.retail.flow.order.entity.Order;
 import com.retail.flow.order.repository.OrderRepository;
 import com.retail.flow.user.entity.User;
+import com.retail.flow.user.repository.UserRepository;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
-import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,14 +27,29 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1/notifications")
-@RequiredArgsConstructor
 public class NotificationController {
 
     private final BuyerNotificationRepository notificationRepository;
     private final CustomerRepository customerRepository;
-    private final OrderRepository orderRepository = null;
+    private final OrderRepository orderRepository;
+    private final UserRepository userRepository;
     private final CurrentUserService currentUserService;
     private final FcmPushService fcmPushService;
+
+    public NotificationController(
+            BuyerNotificationRepository notificationRepository,
+            CustomerRepository customerRepository,
+            OrderRepository orderRepository,
+            UserRepository userRepository,
+            CurrentUserService currentUserService,
+            FcmPushService fcmPushService) {
+        this.notificationRepository = notificationRepository;
+        this.customerRepository = customerRepository;
+        this.orderRepository = orderRepository;
+        this.userRepository = userRepository;
+        this.currentUserService = currentUserService;
+        this.fcmPushService = fcmPushService;
+    }
 
     // 1. BUYER: अपना FCM Device Token रजिस्टर करें
     @PostMapping("/fcm-token")
@@ -82,6 +97,7 @@ public class NotificationController {
         String cleanTitle = request.getTitle().trim();
         String cleanMsg = request.getMessage().trim();
 
+        // A. सभी दुकानदारों (All Buyers) के लिए
         if (Boolean.TRUE.equals(request.getSendToAllBuyers())) {
             List<Customer> allCustomers = customerRepository.findAll();
             List<BuyerNotification> batch = new ArrayList<>();
@@ -106,18 +122,23 @@ public class NotificationController {
             ));
         }
 
+        // B. खास ऑर्डर (Order ID) या एक ग्राहक (Customer ID / User ID) के लिए
         Customer targetCustomer = null;
         if (request.getOrderId() != null) {
             Order order = orderRepository.findById(request.getOrderId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Order not found: " + request.getOrderId()));
+                    .orElseThrow(() -> new ResourceNotFoundException("Order #" + request.getOrderId() + " नहीं मिला।"));
             targetCustomer = order.getCustomer();
         } else if (request.getCustomerId() != null) {
-            targetCustomer = customerRepository.findById(request.getCustomerId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Customer not found: " + request.getCustomerId()));
+            Long inputId = request.getCustomerId();
+            // पहले customers टेबल में ढूँढें, अगर न मिले तो users टेबल की ID से ईमेल निकालकर ढूँढें
+            targetCustomer = customerRepository.findById(inputId)
+                    .orElseGet(() -> userRepository.findById(inputId)
+                            .flatMap(u -> customerRepository.findByEmail(u.getEmail()))
+                            .orElseThrow(() -> new ResourceNotFoundException("Customer/User ID #" + inputId + " नहीं मिला।")));
         }
 
         if (targetCustomer == null) {
-            throw new BusinessValidationException("Provide orderId, customerId, or set sendToAllBuyers = true.");
+            throw new BusinessValidationException("कृपया Order ID या Customer ID प्रदान करें।");
         }
 
         BuyerNotification saved = notificationRepository.save(BuyerNotification.builder()
