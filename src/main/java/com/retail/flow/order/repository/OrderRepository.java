@@ -25,6 +25,10 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @EntityGraph(attributePaths = {"customer"})
     Page<Order> findBySellerId(Long sellerId, Pageable pageable);
 
+    // ✅ FIX 3 IMPLEMENTED: Seller ko PLACED (unapproved) orders nahi dikhenge
+    @EntityGraph(attributePaths = {"customer"})
+    Page<Order> findBySellerIdAndStatusNot(Long sellerId, Order.OrderStatus excludedStatus, Pageable pageable);
+
     @EntityGraph(attributePaths = {"customer"})
     Page<Order> findByCustomerId(Long customerId, Pageable pageable);
 

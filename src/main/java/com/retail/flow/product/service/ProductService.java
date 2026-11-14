@@ -50,7 +50,6 @@ public class ProductService {
                 ? requestDto.getSellerId()
                 : caller.getId();
 
-        // Auto-generate Product Code if left blank, or validate manual Product Code
         String trimmedProductCode;
         if (StringUtils.hasText(requestDto.getProductCode())) {
             trimmedProductCode = requestDto.getProductCode().trim().toUpperCase();
@@ -159,7 +158,11 @@ public class ProductService {
             throw new AccessDeniedException("You are not authorized to edit another seller's product.");
         }
 
-        Long sellerId = product.getSellerId();
+        Long sellerId = (caller.getRole() == User.Role.ADMIN && requestDto.getSellerId() != null)
+                ? requestDto.getSellerId()
+                : product.getSellerId();
+        product.setSellerId(sellerId);
+
         String trimmedProductCode = StringUtils.hasText(requestDto.getProductCode())
                 ? requestDto.getProductCode().trim().toUpperCase()
                 : product.getProductCode();
@@ -234,6 +237,7 @@ public class ProductService {
                 int previousStock = targetVariant.getStock();
                 int newStock = vDto.getStock();
 
+                targetVariant.setSellerId(sellerId);
                 targetVariant.setSku(normalizedSku);
                 targetVariant.setSize(normalizedSize);
                 targetVariant.setColor(StringUtils.hasText(vDto.getColor()) ? vDto.getColor().trim() : "Standard");
@@ -280,7 +284,6 @@ public class ProductService {
             }
         }
 
-        // Fix F-06: Handle variants omitted from the update request safely without breaking historical Order/Sale FKs
         for (ProductVariant existingVariant : existingById.values()) {
             if (!retainedVariantIds.contains(existingVariant.getId()) && existingVariant.getStock() > 0) {
                 int prevStock = existingVariant.getStock();
@@ -374,13 +377,18 @@ public class ProductService {
                 .build();
     }
 
+    // ✅ FIX 1 IMPLEMENTED: Admin ko sabhi sellers ke saare products dikhenge
     @Transactional(readOnly = true)
     public List<ProductResponseDto> getMyProducts(int page, int size, String callerEmail) {
         User caller = currentUserService.getCurrentUser(callerEmail);
         int safeSize = Math.min(Math.max(size, 1), 100);
         Pageable pageable = PageRequest.of(Math.max(page, 0), safeSize, Sort.by("id").descending());
 
-        return productRepository.findBySellerId(caller.getId(), pageable).stream()
+        Page<Product> productPage = (caller.getRole() == User.Role.ADMIN)
+                ? productRepository.findAll(pageable)
+                : productRepository.findBySellerId(caller.getId(), pageable);
+
+        return productPage.getContent().stream()
                 .map(product -> mapToResponseDto(product, caller))
                 .collect(Collectors.toList());
     }

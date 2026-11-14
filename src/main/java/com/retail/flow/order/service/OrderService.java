@@ -3,6 +3,7 @@ package com.retail.flow.order.service;
 import com.retail.flow.cart.repository.CartRepository;
 import com.retail.flow.common.exception.BusinessValidationException;
 import com.retail.flow.common.exception.ResourceNotFoundException;
+import com.retail.flow.common.security.AuthenticatedUserPrincipal;
 import com.retail.flow.common.security.CurrentUserService;
 import com.retail.flow.customer.entity.Customer;
 import com.retail.flow.customer.repository.CustomerRepository;
@@ -26,6 +27,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -57,7 +59,9 @@ public class OrderService {
 
     private final com.retail.flow.notification.repository.BuyerNotificationRepository notificationRepository;
     private final com.retail.flow.notification.service.FcmPushService fcmPushService;
+
     private record SellerLineItem(Long variantId, int quantity) {}
+    private record SplitOrderReservation(List<InventoryTransaction> logs) {}
 
     @Transactional
     public OrderResponseDto createOrder(OrderRequestDto requestDto, String userEmail) {
@@ -227,6 +231,7 @@ public class OrderService {
         return responses;
     }
 
+    // ✅ FIX 3 IMPLEMENTED: Admin Permission + Multi-Seller Product Routing & Order Splitting
     @Transactional
     public OrderResponseDto modifyOrderBySeller(Long orderId, SellerOrderUpdateRequestDto requestDto, String callerEmail) {
         User caller = currentUserService.getCurrentUser(callerEmail);
@@ -235,6 +240,10 @@ public class OrderService {
 
         if (caller.getRole() != User.Role.ADMIN && !order.getSellerId().equals(caller.getId())) {
             throw new AccessDeniedException("You are not authorized to modify another seller's order.");
+        }
+
+        if (caller.getRole() == User.Role.SELLER && order.getStatus() == OrderStatus.PLACED) {
+            throw new AccessDeniedException("This order is awaiting Admin approval.");
         }
 
         if (order.getStatus() != OrderStatus.PLACED && order.getStatus() != OrderStatus.CONFIRMED) {
@@ -267,14 +276,15 @@ public class OrderService {
             orderRepository.flush();
         }
 
-        BigDecimal subtotal = BigDecimal.ZERO;
-        BigDecimal totalTaxAmount = BigDecimal.ZERO;
+        Map<Long, List<OrderItemRequestDto>> itemsBySeller = new LinkedHashMap<>();
+        Map<Long, ProductVariant> variantCache = new HashMap<>();
 
         for (OrderItemRequestDto itemReq : requestDto.getItems()) {
             ProductVariant variant = productVariantRepository.findById(itemReq.getVariantId())
                     .orElseThrow(() -> new ResourceNotFoundException("Variant not found with id: " + itemReq.getVariantId()));
 
-            if (!variant.getProduct().getSellerId().equals(order.getSellerId())) {
+            // Normal Seller sirf apne catalog ke variants rakh sakta hai, par ADMIN kisi bhi Seller ka variant assign kar sakta hai
+            if (caller.getRole() != User.Role.ADMIN && !variant.getProduct().getSellerId().equals(order.getSellerId())) {
                 throw new BusinessValidationException(
                         "Variant SKU '" + variant.getSku() + "' does not belong to your seller catalog.");
             }
@@ -284,6 +294,129 @@ public class OrderService {
                         + "' (Available: " + variant.getStock() + ", Requested: " + itemReq.getQuantity() + ").");
             }
 
+            variantCache.put(variant.getId(), variant);
+            Long targetSellerId = variant.getProduct().getSellerId();
+            itemsBySeller.computeIfAbsent(targetSellerId, k -> new ArrayList<>()).add(itemReq);
+        }
+
+        if (StringUtils.hasText(requestDto.getDeliveryAddress())) {
+            order.setDeliveryAddress(requestDto.getDeliveryAddress().trim());
+        }
+
+        String cleanRemarks = StringUtils.hasText(requestDto.getSellerRemarks())
+                ? requestDto.getSellerRemarks().trim() : null;
+        boolean shouldConfirm = Boolean.TRUE.equals(requestDto.getConfirmImmediately());
+
+        List<Long> sellerIds = new ArrayList<>(itemsBySeller.keySet());
+        Long primarySellerId = sellerIds.get(0);
+
+        order.setSellerId(primarySellerId);
+        populateAndReserveOrderItems(order, itemsBySeller.get(primarySellerId), variantCache, inventoryLogs);
+
+        BigDecimal subtotal = order.getTotalAmount();
+        BigDecimal discount = (requestDto.getDiscountAmount() != null
+                && requestDto.getDiscountAmount().compareTo(BigDecimal.ZERO) > 0)
+                ? requestDto.getDiscountAmount()
+                : BigDecimal.ZERO;
+
+        if (discount.compareTo(subtotal) > 0) {
+            throw new BusinessValidationException(
+                    "Discount amount (₹" + discount + ") cannot exceed order subtotal (₹" + subtotal + ").");
+        }
+
+        BigDecimal finalTotal = subtotal.subtract(discount);
+        BigDecimal paid = order.getPaidAmount() != null ? order.getPaidAmount() : BigDecimal.ZERO;
+
+        if (finalTotal.compareTo(paid) < 0) {
+            throw new BusinessValidationException(
+                    "Modified order total (₹" + finalTotal + ") cannot be less than the amount already paid by the buyer (₹" + paid + ").");
+        }
+
+        order.setDiscountAmount(discount);
+        order.setSellerRemarks(cleanRemarks);
+        order.setTotalAmount(finalTotal);
+
+        BigDecimal returned = order.getReturnedAmount() != null ? order.getReturnedAmount() : BigDecimal.ZERO;
+        BigDecimal netPayable = finalTotal.subtract(returned).max(BigDecimal.ZERO);
+
+        if (paid.compareTo(BigDecimal.ZERO) <= 0) {
+            order.setPaymentStatus(PaymentStatus.UNPAID);
+        } else if (paid.compareTo(netPayable) >= 0) {
+            order.setPaymentStatus(PaymentStatus.PAID);
+        } else {
+            order.setPaymentStatus(PaymentStatus.PARTIALLY_PAID);
+        }
+
+        if (shouldConfirm && order.getStatus() == OrderStatus.PLACED) {
+            order.setStatus(OrderStatus.CONFIRMED);
+        }
+
+        Order savedOrder = orderRepository.save(order);
+
+        // Agar Admin ne ek hi order ke products alag-alag Sellers ko assign kiye hain, toh unke liye naye Orders split karein
+        for (int i = 1; i < sellerIds.size(); i++) {
+            Long splitSellerId = sellerIds.get(i);
+            Order splitOrder = Order.builder()
+                    .customer(order.getCustomer())
+                    .sellerId(splitSellerId)
+                    .orderItems(new ArrayList<>())
+                    .totalAmount(BigDecimal.ZERO)
+                    .discountAmount(BigDecimal.ZERO)
+                    .taxAmount(BigDecimal.ZERO)
+                    .returnedAmount(BigDecimal.ZERO)
+                    .paidAmount(BigDecimal.ZERO)
+                    .paymentStatus(PaymentStatus.UNPAID)
+                    .deliveryAddress(order.getDeliveryAddress())
+                    .sellerRemarks(cleanRemarks)
+                    .status(shouldConfirm ? OrderStatus.CONFIRMED : OrderStatus.PLACED)
+                    .build();
+
+            SplitOrderReservation splitRes = populateAndReserveSplitOrder(
+                    splitOrder, itemsBySeller.get(splitSellerId), variantCache);
+            Order savedSplit = orderRepository.save(splitOrder);
+
+            for (InventoryTransaction tx : splitRes.logs()) {
+                tx.setReferenceId(savedSplit.getId());
+            }
+            inventoryLogs.addAll(splitRes.logs());
+        }
+
+        if (!inventoryLogs.isEmpty()) {
+            inventoryTransactionRepository.saveAll(inventoryLogs);
+        }
+
+        String modTitle = (savedOrder.getStatus() == OrderStatus.CONFIRMED)
+                ? "Order #" + savedOrder.getId() + " Confirmed ✅"
+                : "Order #" + savedOrder.getId() + " Updated 📝";
+        String modMsg = "आपके ऑर्डर #" + savedOrder.getId() + " की समीक्षा कर ली गई है। कुल देय राशि: ₹" + savedOrder.getTotalAmount()
+                + (discount.compareTo(BigDecimal.ZERO) > 0 ? " (छूट: ₹" + discount + ")" : "");
+        if (StringUtils.hasText(savedOrder.getSellerRemarks())) {
+            modMsg += "\nनोट: \"" + savedOrder.getSellerRemarks() + "\"";
+        }
+        notificationRepository.save(com.retail.flow.notification.entity.BuyerNotification.builder()
+                .customerId(savedOrder.getCustomer().getId())
+                .senderId(caller.getId())
+                .orderId(savedOrder.getId())
+                .title(modTitle)
+                .message(modMsg)
+                .isRead(false)
+                .build());
+        fcmPushService.sendPushToBuyer(savedOrder.getCustomer().getFcmToken(), modTitle, modMsg, savedOrder.getId());
+
+        return mapToResponseDto(savedOrder);
+    }
+
+    private void populateAndReserveOrderItems(
+            Order order,
+            List<OrderItemRequestDto> itemReqs,
+            Map<Long, ProductVariant> variantCache,
+            List<InventoryTransaction> inventoryLogs) {
+
+        BigDecimal subtotal = BigDecimal.ZERO;
+        BigDecimal totalTaxAmount = BigDecimal.ZERO;
+
+        for (OrderItemRequestDto itemReq : itemReqs) {
+            ProductVariant variant = variantCache.get(itemReq.getVariantId());
             int prevStock = variant.getStock();
             int newStock = prevStock - itemReq.getQuantity();
             variant.setStock(newStock);
@@ -325,80 +458,64 @@ public class OrderService {
             order.getOrderItems().add(newItem);
         }
 
-        if (StringUtils.hasText(requestDto.getDeliveryAddress())) {
-            order.setDeliveryAddress(requestDto.getDeliveryAddress().trim());
-        }
-
-        BigDecimal discount = (requestDto.getDiscountAmount() != null
-                && requestDto.getDiscountAmount().compareTo(BigDecimal.ZERO) > 0)
-                ? requestDto.getDiscountAmount()
-                : BigDecimal.ZERO;
-
-        if (discount.compareTo(subtotal) > 0) {
-            throw new BusinessValidationException(
-                    "Discount amount (₹" + discount + ") cannot exceed order subtotal (₹" + subtotal + ").");
-        }
-
-        BigDecimal finalTotal = subtotal.subtract(discount);
-        BigDecimal paid = order.getPaidAmount() != null ? order.getPaidAmount() : BigDecimal.ZERO;
-
-        if (finalTotal.compareTo(paid) < 0) {
-            throw new BusinessValidationException(
-                    "Modified order total (₹" + finalTotal + ") cannot be less than the amount already paid by the buyer (₹" + paid + ").");
-        }
-
-        BigDecimal adjustedTaxAmount = totalTaxAmount;
-        if (discount.compareTo(BigDecimal.ZERO) > 0 && subtotal.compareTo(BigDecimal.ZERO) > 0) {
-            adjustedTaxAmount = totalTaxAmount.multiply(finalTotal)
-                    .divide(subtotal, 2, RoundingMode.HALF_UP);
-        }
-
-        order.setDiscountAmount(discount);
+        order.setTotalAmount(subtotal);
         order.setTaxAmount(totalTaxAmount);
-        order.setSellerRemarks(StringUtils.hasText(requestDto.getSellerRemarks())
-                ? requestDto.getSellerRemarks().trim()
-                : null);
-        order.setTotalAmount(finalTotal);
+    }
 
-        BigDecimal returned = order.getReturnedAmount() != null ? order.getReturnedAmount() : BigDecimal.ZERO;
-        BigDecimal netPayable = finalTotal.subtract(returned).max(BigDecimal.ZERO);
+    private SplitOrderReservation populateAndReserveSplitOrder(
+            Order splitOrder,
+            List<OrderItemRequestDto> itemReqs,
+            Map<Long, ProductVariant> variantCache) {
 
-        if (paid.compareTo(BigDecimal.ZERO) <= 0) {
-            order.setPaymentStatus(PaymentStatus.UNPAID);
-        } else if (paid.compareTo(netPayable) >= 0) {
-            order.setPaymentStatus(PaymentStatus.PAID);
-        } else {
-            order.setPaymentStatus(PaymentStatus.PARTIALLY_PAID);
+        BigDecimal subtotal = BigDecimal.ZERO;
+        BigDecimal totalTaxAmount = BigDecimal.ZERO;
+        List<InventoryTransaction> logs = new ArrayList<>();
+
+        for (OrderItemRequestDto itemReq : itemReqs) {
+            ProductVariant variant = variantCache.get(itemReq.getVariantId());
+            int prevStock = variant.getStock();
+            int newStock = prevStock - itemReq.getQuantity();
+            variant.setStock(newStock);
+            productVariantRepository.save(variant);
+
+            logs.add(InventoryTransaction.builder()
+                    .productVariant(variant)
+                    .type(InventoryTransaction.TransactionType.ORDER_RESERVATION)
+                    .quantity(itemReq.getQuantity())
+                    .referenceType("ADMIN_ORDER_SPLIT")
+                    .previousStock(prevStock)
+                    .newStock(newStock)
+                    .build());
+
+            BigDecimal negotiatedUnitPrice = (itemReq.getUnitPrice() != null
+                    && itemReq.getUnitPrice().compareTo(BigDecimal.ZERO) > 0)
+                    ? itemReq.getUnitPrice()
+                    : variant.getSellingPrice();
+
+            BigDecimal lineTotal = negotiatedUnitPrice.multiply(BigDecimal.valueOf(itemReq.getQuantity()));
+            BigDecimal gstPct = variant.getGstPercentage() != null ? variant.getGstPercentage() : BigDecimal.ZERO;
+            BigDecimal itemTax = calculateInclusiveGstTax(lineTotal, gstPct);
+
+            subtotal = subtotal.add(lineTotal);
+            totalTaxAmount = totalTaxAmount.add(itemTax);
+
+            OrderItem newItem = OrderItem.builder()
+                    .order(splitOrder)
+                    .productVariant(variant)
+                    .quantity(itemReq.getQuantity())
+                    .price(negotiatedUnitPrice)
+                    .hsnCode(variant.getHsnCode())
+                    .gstPercentage(gstPct)
+                    .taxAmount(itemTax)
+                    .itemNote(StringUtils.hasText(itemReq.getItemNote()) ? itemReq.getItemNote().trim() : null)
+                    .build();
+
+            splitOrder.getOrderItems().add(newItem);
         }
 
-        if (Boolean.TRUE.equals(requestDto.getConfirmImmediately()) && order.getStatus() == OrderStatus.PLACED) {
-            order.setStatus(OrderStatus.CONFIRMED);
-        }
-
-        Order savedOrder = orderRepository.save(order);
-        if (!inventoryLogs.isEmpty()) {
-            inventoryTransactionRepository.saveAll(inventoryLogs);
-        }
-        // 🟢 2. नया: जब सेलर ऑर्डर का बिल/डिस्काउंट अपडेट या कन्फर्म करे तो ग्राहक को नोटिफिकेशन भेजें
-        String modTitle = (savedOrder.getStatus() == OrderStatus.CONFIRMED)
-                ? "Order #" + savedOrder.getId() + " Confirmed ✅"
-                : "Order #" + savedOrder.getId() + " Updated by Seller 📝";
-        String modMsg = "सेलर ने आपके ऑर्डर #" + savedOrder.getId() + " की समीक्षा कर ली है। कुल देय राशि: ₹" + savedOrder.getTotalAmount()
-                + (discount.compareTo(BigDecimal.ZERO) > 0 ? " (छूट: ₹" + discount + ")" : "");
-        if (StringUtils.hasText(savedOrder.getSellerRemarks())) {
-            modMsg += "\nसेलर नोट: \"" + savedOrder.getSellerRemarks() + "\"";
-        }
-        notificationRepository.save(com.retail.flow.notification.entity.BuyerNotification.builder()
-                .customerId(savedOrder.getCustomer().getId())
-                .senderId(caller.getId())
-                .orderId(savedOrder.getId())
-                .title(modTitle)
-                .message(modMsg)
-                .isRead(false)
-                .build());
-        fcmPushService.sendPushToBuyer(savedOrder.getCustomer().getFcmToken(), modTitle, modMsg, savedOrder.getId());
-
-        return mapToResponseDto(savedOrder);
+        splitOrder.setTotalAmount(subtotal);
+        splitOrder.setTaxAmount(totalTaxAmount);
+        return new SplitOrderReservation(logs);
     }
 
     @Transactional
@@ -431,6 +548,10 @@ public class OrderService {
             if (!order.getSellerId().equals(caller.getId())) {
                 throw new AccessDeniedException("You are not authorized to update another seller's order.");
             }
+            // ✅ FIX 3B: Seller PLACED order ko bina Admin permission ke confirm/modify nahi kar sakta
+            if (currentStatus == OrderStatus.PLACED) {
+                throw new AccessDeniedException("Orders in PLACED status require Admin confirmation before seller dispatch.");
+            }
         }
 
         if (!currentStatus.canTransitionTo(targetStatus)) {
@@ -447,7 +568,7 @@ public class OrderService {
 
         if (caller.getRole() != User.Role.BUYER) {
             String statusHindi = switch (targetStatus) {
-                case CONFIRMED -> "सेलर द्वारा कन्फर्म (Confirmed) कर दिया गया है ✅";
+                case CONFIRMED -> "एडमिन द्वारा कन्फर्म (Confirmed) कर दिया गया है ✅";
                 case PROCESSING -> "गोदाम में पैक (Processing) किया जा रहा है 📦";
                 case SHIPPED -> "गोदाम से डिस्पैच (Out for Delivery) हो चुका है 🚚";
                 case DELIVERED -> "आपकी दुकान पर डिलीवर हो गया है 🎉";
@@ -514,6 +635,9 @@ public class OrderService {
             if (!order.getSellerId().equals(caller.getId())) {
                 throw new AccessDeniedException("You are not authorized to view another seller's order.");
             }
+            if (order.getStatus() == OrderStatus.PLACED) {
+                throw new AccessDeniedException("This order is awaiting Admin approval.");
+            }
         }
 
         return mapToResponseDto(order);
@@ -537,6 +661,7 @@ public class OrderService {
                 .collect(Collectors.toList());
     }
 
+    // ✅ FIX 3C: Seller ko PLACED status wale orders nahi dikhenge; jab Admin CONFIRMED karega tabhi dikhenge
     @Transactional(readOnly = true)
     public List<OrderResponseDto> getOrdersBySellerId(Long sellerId, String callerEmail, int page, int size) {
         User caller = currentUserService.getCurrentUser(callerEmail);
@@ -546,6 +671,12 @@ public class OrderService {
         }
 
         Pageable pageable = buildPageable(page, size);
+        if (caller.getRole() == User.Role.SELLER) {
+            return orderRepository.findBySellerIdAndStatusNot(sellerId, OrderStatus.PLACED, pageable).stream()
+                    .map(this::mapToResponseDto)
+                    .collect(Collectors.toList());
+        }
+
         return orderRepository.findBySellerId(sellerId, pageable).stream()
                 .map(this::mapToResponseDto)
                 .collect(Collectors.toList());
@@ -567,7 +698,14 @@ public class OrderService {
         return PageRequest.of(safePage, safeSize, Sort.by("id").descending());
     }
 
+    // ✅ FIX 2 IMPLEMENTED: Seller ke liye Buyer details (Name, Mobile, Address, CustomerId) hide ki gayi hain
     private OrderResponseDto mapToResponseDto(Order order) {
+        boolean hideBuyerDetails = false;
+        var auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null && auth.getPrincipal() instanceof AuthenticatedUserPrincipal principal) {
+            hideBuyerDetails = (principal.getUser().getRole() == User.Role.SELLER);
+        }
+
         List<OrderResponseDto.OrderItemResponseDto> itemDtos = order.getOrderItems().stream()
                 .map(item -> OrderResponseDto.OrderItemResponseDto.builder()
                         .id(item.getId())
@@ -608,11 +746,11 @@ public class OrderService {
                 .sellerGstNumber(sellerGst)
                 .sellerPhone(sellerPhone)
                 .sellerAddress(sellerAddress)
-                .customerId(order.getCustomer().getId())
-                .customerName(order.getCustomer().getName())
-                .customerMobile(order.getCustomer().getMobile())
+                .customerId(hideBuyerDetails ? null : order.getCustomer().getId())
+                .customerName(hideBuyerDetails ? ("Order #" + order.getId()) : order.getCustomer().getName())
+                .customerMobile(hideBuyerDetails ? "" : order.getCustomer().getMobile())
                 .status(order.getStatus().name())
-                .deliveryAddress(order.getDeliveryAddress())
+                .deliveryAddress(hideBuyerDetails ? "Admin Hub Dispatch" : order.getDeliveryAddress())
                 .subtotalAmount(subtotal)
                 .discountAmount(discount)
                 .taxAmount(order.getTaxAmount() != null ? order.getTaxAmount() : BigDecimal.ZERO)
