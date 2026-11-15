@@ -11,6 +11,7 @@ import java.util.List;
 @Builder
 public class OrderResponseDto {
     private Long id;
+    private String orderGroupId;
     private Long sellerId;
     private String sellerBusinessName;
     private String sellerGstNumber;

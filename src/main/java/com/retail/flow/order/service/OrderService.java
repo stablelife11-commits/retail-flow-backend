@@ -3,7 +3,6 @@ package com.retail.flow.order.service;
 import com.retail.flow.cart.repository.CartRepository;
 import com.retail.flow.common.exception.BusinessValidationException;
 import com.retail.flow.common.exception.ResourceNotFoundException;
-import com.retail.flow.common.security.AuthenticatedUserPrincipal;
 import com.retail.flow.common.security.CurrentUserService;
 import com.retail.flow.customer.entity.Customer;
 import com.retail.flow.customer.repository.CustomerRepository;
@@ -27,20 +26,22 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.security.access.AccessDeniedException;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 @Service
@@ -48,6 +49,7 @@ import java.util.stream.Collectors;
 public class OrderService {
 
     private static final BigDecimal HUNDRED = new BigDecimal("100");
+    private static final DateTimeFormatter GROUP_DATE_FMT = DateTimeFormatter.BASIC_ISO_DATE;
 
     private final OrderRepository orderRepository;
     private final CustomerRepository customerRepository;
@@ -57,11 +59,7 @@ public class OrderService {
     private final CurrentUserService currentUserService;
     private final CartRepository cartRepository;
 
-    private final com.retail.flow.notification.repository.BuyerNotificationRepository notificationRepository;
-    private final com.retail.flow.notification.service.FcmPushService fcmPushService;
-
     private record SellerLineItem(Long variantId, int quantity) {}
-    private record SplitOrderReservation(List<InventoryTransaction> logs) {}
 
     @Transactional
     public OrderResponseDto createOrder(OrderRequestDto requestDto, String userEmail) {
@@ -72,6 +70,12 @@ public class OrderService {
     @Transactional
     public List<OrderResponseDto> createMultiSellerOrders(OrderRequestDto requestDto, String userEmail) {
         return processOrdersBySeller(requestDto, userEmail, true);
+    }
+
+    private String generateMasterOrderGroupId() {
+        String datePart = LocalDate.now().format(GROUP_DATE_FMT);
+        int randomPart = ThreadLocalRandom.current().nextInt(1000, 10000);
+        return "FM-" + datePart + "-" + randomPart;
     }
 
     private List<OrderResponseDto> processOrdersBySeller(
@@ -145,13 +149,15 @@ public class OrderService {
                     "Cart contains items from multiple sellers. Please use /api/v1/orders/checkout or place separate orders per seller.");
         }
 
+        // Single Master Order Group ID shared across all seller orders created in this checkout
+        String masterOrderGroupId = generateMasterOrderGroupId();
         List<OrderResponseDto> responses = new ArrayList<>();
-        List<User> activeAdmins = userRepository.findByRoleAndActiveTrue(User.Role.ADMIN);
 
         for (Long sellerId : itemsBySeller.keySet()) {
             List<SellerLineItem> sellerItems = itemsBySeller.get(sellerId);
 
             Order order = Order.builder()
+                    .orderGroupId(masterOrderGroupId)
                     .customer(customer)
                     .sellerId(sellerId)
                     .orderItems(new ArrayList<>())
@@ -218,14 +224,6 @@ public class OrderService {
             }
             inventoryTransactionRepository.saveAll(pendingAuditLogs);
 
-            // 🟢 1. जैसे ही Buyer ऑर्डर प्लेस करे -> सभी सक्रिय ADMIN को तुरंत Push Notification भेजें
-            String adminTitle = "नया होलसेल ऑर्डर आया है! 🛒 (Order #" + savedOrder.getId() + ")";
-            String adminBody = "ग्राहक: " + customer.getName() + " • कुल राशि: ₹" + savedOrder.getTotalAmount()
-                    + " • कृपया रिव्यू और कन्फर्म करें।";
-            for (User adminUser : activeAdmins) {
-                fcmPushService.sendPushToBuyer(adminUser.getFcmToken(), adminTitle, adminBody, savedOrder.getId());
-            }
-
             responses.add(mapToResponseDto(savedOrder));
         }
 
@@ -248,10 +246,6 @@ public class OrderService {
 
         if (caller.getRole() != User.Role.ADMIN && !order.getSellerId().equals(caller.getId())) {
             throw new AccessDeniedException("You are not authorized to modify another seller's order.");
-        }
-
-        if (caller.getRole() == User.Role.SELLER && order.getStatus() == OrderStatus.PLACED) {
-            throw new AccessDeniedException("This order is awaiting Admin approval.");
         }
 
         if (order.getStatus() != OrderStatus.PLACED && order.getStatus() != OrderStatus.CONFIRMED) {
@@ -284,14 +278,14 @@ public class OrderService {
             orderRepository.flush();
         }
 
-        Map<Long, List<OrderItemRequestDto>> itemsBySeller = new LinkedHashMap<>();
-        Map<Long, ProductVariant> variantCache = new HashMap<>();
+        BigDecimal subtotal = BigDecimal.ZERO;
+        BigDecimal totalTaxAmount = BigDecimal.ZERO;
 
         for (OrderItemRequestDto itemReq : requestDto.getItems()) {
             ProductVariant variant = productVariantRepository.findById(itemReq.getVariantId())
                     .orElseThrow(() -> new ResourceNotFoundException("Variant not found with id: " + itemReq.getVariantId()));
 
-            if (caller.getRole() != User.Role.ADMIN && !variant.getProduct().getSellerId().equals(order.getSellerId())) {
+            if (!variant.getProduct().getSellerId().equals(order.getSellerId())) {
                 throw new BusinessValidationException(
                         "Variant SKU '" + variant.getSku() + "' does not belong to your seller catalog.");
             }
@@ -301,138 +295,6 @@ public class OrderService {
                         + "' (Available: " + variant.getStock() + ", Requested: " + itemReq.getQuantity() + ").");
             }
 
-            variantCache.put(variant.getId(), variant);
-            Long targetSellerId = variant.getProduct().getSellerId();
-            itemsBySeller.computeIfAbsent(targetSellerId, k -> new ArrayList<>()).add(itemReq);
-        }
-
-        if (StringUtils.hasText(requestDto.getDeliveryAddress())) {
-            order.setDeliveryAddress(requestDto.getDeliveryAddress().trim());
-        }
-
-        String cleanRemarks = StringUtils.hasText(requestDto.getSellerRemarks())
-                ? requestDto.getSellerRemarks().trim() : null;
-        boolean shouldConfirm = Boolean.TRUE.equals(requestDto.getConfirmImmediately());
-
-        List<Long> sellerIds = new ArrayList<>(itemsBySeller.keySet());
-        Long primarySellerId = sellerIds.get(0);
-
-        order.setSellerId(primarySellerId);
-        populateAndReserveOrderItems(order, itemsBySeller.get(primarySellerId), variantCache, inventoryLogs);
-
-        BigDecimal subtotal = order.getTotalAmount();
-        BigDecimal discount = (requestDto.getDiscountAmount() != null
-                && requestDto.getDiscountAmount().compareTo(BigDecimal.ZERO) > 0)
-                ? requestDto.getDiscountAmount()
-                : BigDecimal.ZERO;
-
-        if (discount.compareTo(subtotal) > 0) {
-            throw new BusinessValidationException(
-                    "Discount amount (₹" + discount + ") cannot exceed order subtotal (₹" + subtotal + ").");
-        }
-
-        BigDecimal finalTotal = subtotal.subtract(discount);
-        BigDecimal paid = order.getPaidAmount() != null ? order.getPaidAmount() : BigDecimal.ZERO;
-
-        if (finalTotal.compareTo(paid) < 0) {
-            throw new BusinessValidationException(
-                    "Modified order total (₹" + finalTotal + ") cannot be less than the amount already paid by the buyer (₹" + paid + ").");
-        }
-
-        order.setDiscountAmount(discount);
-        order.setSellerRemarks(cleanRemarks);
-        order.setTotalAmount(finalTotal);
-
-        BigDecimal returned = order.getReturnedAmount() != null ? order.getReturnedAmount() : BigDecimal.ZERO;
-        BigDecimal netPayable = finalTotal.subtract(returned).max(BigDecimal.ZERO);
-
-        if (paid.compareTo(BigDecimal.ZERO) <= 0) {
-            order.setPaymentStatus(PaymentStatus.UNPAID);
-        } else if (paid.compareTo(netPayable) >= 0) {
-            order.setPaymentStatus(PaymentStatus.PAID);
-        } else {
-            order.setPaymentStatus(PaymentStatus.PARTIALLY_PAID);
-        }
-
-        if (shouldConfirm && order.getStatus() == OrderStatus.PLACED) {
-            order.setStatus(OrderStatus.CONFIRMED);
-        }
-
-        Order savedOrder = orderRepository.save(order);
-
-        // 🟢 2A. अगर मुख्य ऑर्डर CONFIRMED है, तो उसके Seller को (बिना Buyer डिटेल के) तुरंत नोटिफिकेशन भेजें
-        if (savedOrder.getStatus() == OrderStatus.CONFIRMED) {
-            notifySellerOnOrderConfirmed(savedOrder);
-        }
-
-        for (int i = 1; i < sellerIds.size(); i++) {
-            Long splitSellerId = sellerIds.get(i);
-            Order splitOrder = Order.builder()
-                    .customer(order.getCustomer())
-                    .sellerId(splitSellerId)
-                    .orderItems(new ArrayList<>())
-                    .totalAmount(BigDecimal.ZERO)
-                    .discountAmount(BigDecimal.ZERO)
-                    .taxAmount(BigDecimal.ZERO)
-                    .returnedAmount(BigDecimal.ZERO)
-                    .paidAmount(BigDecimal.ZERO)
-                    .paymentStatus(PaymentStatus.UNPAID)
-                    .deliveryAddress(order.getDeliveryAddress())
-                    .sellerRemarks(cleanRemarks)
-                    .status(shouldConfirm ? OrderStatus.CONFIRMED : OrderStatus.PLACED)
-                    .build();
-
-            SplitOrderReservation splitRes = populateAndReserveSplitOrder(
-                    splitOrder, itemsBySeller.get(splitSellerId), variantCache);
-            Order savedSplit = orderRepository.save(splitOrder);
-
-            for (InventoryTransaction tx : splitRes.logs()) {
-                tx.setReferenceId(savedSplit.getId());
-            }
-            inventoryLogs.addAll(splitRes.logs());
-
-            // 🟢 2B. अगर स्प्लिट ऑर्डर भी CONFIRMED है, तो उस दूसरे Seller को भी तुरंत नोटिफिकेशन भेजें
-            if (savedSplit.getStatus() == OrderStatus.CONFIRMED) {
-                notifySellerOnOrderConfirmed(savedSplit);
-            }
-        }
-
-        if (!inventoryLogs.isEmpty()) {
-            inventoryTransactionRepository.saveAll(inventoryLogs);
-        }
-
-        String modTitle = (savedOrder.getStatus() == OrderStatus.CONFIRMED)
-                ? "Order #" + savedOrder.getId() + " Confirmed ✅"
-                : "Order #" + savedOrder.getId() + " Updated 📝";
-        String modMsg = "आपके ऑर्डर #" + savedOrder.getId() + " की समीक्षा कर ली गई है। कुल देय राशि: ₹" + savedOrder.getTotalAmount()
-                + (discount.compareTo(BigDecimal.ZERO) > 0 ? " (छूट: ₹" + discount + ")" : "");
-        if (StringUtils.hasText(savedOrder.getSellerRemarks())) {
-            modMsg += "\nनोट: \"" + savedOrder.getSellerRemarks() + "\"";
-        }
-        notificationRepository.save(com.retail.flow.notification.entity.BuyerNotification.builder()
-                .customerId(savedOrder.getCustomer().getId())
-                .senderId(caller.getId())
-                .orderId(savedOrder.getId())
-                .title(modTitle)
-                .message(modMsg)
-                .isRead(false)
-                .build());
-        fcmPushService.sendPushToBuyer(savedOrder.getCustomer().getFcmToken(), modTitle, modMsg, savedOrder.getId());
-
-        return mapToResponseDto(savedOrder);
-    }
-
-    private void populateAndReserveOrderItems(
-            Order order,
-            List<OrderItemRequestDto> itemReqs,
-            Map<Long, ProductVariant> variantCache,
-            List<InventoryTransaction> inventoryLogs) {
-
-        BigDecimal subtotal = BigDecimal.ZERO;
-        BigDecimal totalTaxAmount = BigDecimal.ZERO;
-
-        for (OrderItemRequestDto itemReq : itemReqs) {
-            ProductVariant variant = variantCache.get(itemReq.getVariantId());
             int prevStock = variant.getStock();
             int newStock = prevStock - itemReq.getQuantity();
             variant.setStock(newStock);
@@ -474,64 +336,62 @@ public class OrderService {
             order.getOrderItems().add(newItem);
         }
 
-        order.setTotalAmount(subtotal);
-        order.setTaxAmount(totalTaxAmount);
-    }
-
-    private SplitOrderReservation populateAndReserveSplitOrder(
-            Order splitOrder,
-            List<OrderItemRequestDto> itemReqs,
-            Map<Long, ProductVariant> variantCache) {
-
-        BigDecimal subtotal = BigDecimal.ZERO;
-        BigDecimal totalTaxAmount = BigDecimal.ZERO;
-        List<InventoryTransaction> logs = new ArrayList<>();
-
-        for (OrderItemRequestDto itemReq : itemReqs) {
-            ProductVariant variant = variantCache.get(itemReq.getVariantId());
-            int prevStock = variant.getStock();
-            int newStock = prevStock - itemReq.getQuantity();
-            variant.setStock(newStock);
-            productVariantRepository.save(variant);
-
-            logs.add(InventoryTransaction.builder()
-                    .productVariant(variant)
-                    .type(InventoryTransaction.TransactionType.ORDER_RESERVATION)
-                    .quantity(itemReq.getQuantity())
-                    .referenceType("ADMIN_ORDER_SPLIT")
-                    .previousStock(prevStock)
-                    .newStock(newStock)
-                    .build());
-
-            BigDecimal negotiatedUnitPrice = (itemReq.getUnitPrice() != null
-                    && itemReq.getUnitPrice().compareTo(BigDecimal.ZERO) > 0)
-                    ? itemReq.getUnitPrice()
-                    : variant.getSellingPrice();
-
-            BigDecimal lineTotal = negotiatedUnitPrice.multiply(BigDecimal.valueOf(itemReq.getQuantity()));
-            BigDecimal gstPct = variant.getGstPercentage() != null ? variant.getGstPercentage() : BigDecimal.ZERO;
-            BigDecimal itemTax = calculateInclusiveGstTax(lineTotal, gstPct);
-
-            subtotal = subtotal.add(lineTotal);
-            totalTaxAmount = totalTaxAmount.add(itemTax);
-
-            OrderItem newItem = OrderItem.builder()
-                    .order(splitOrder)
-                    .productVariant(variant)
-                    .quantity(itemReq.getQuantity())
-                    .price(negotiatedUnitPrice)
-                    .hsnCode(variant.getHsnCode())
-                    .gstPercentage(gstPct)
-                    .taxAmount(itemTax)
-                    .itemNote(StringUtils.hasText(itemReq.getItemNote()) ? itemReq.getItemNote().trim() : null)
-                    .build();
-
-            splitOrder.getOrderItems().add(newItem);
+        if (StringUtils.hasText(requestDto.getDeliveryAddress())) {
+            order.setDeliveryAddress(requestDto.getDeliveryAddress().trim());
         }
 
-        splitOrder.setTotalAmount(subtotal);
-        splitOrder.setTaxAmount(totalTaxAmount);
-        return new SplitOrderReservation(logs);
+        BigDecimal discount = (requestDto.getDiscountAmount() != null
+                && requestDto.getDiscountAmount().compareTo(BigDecimal.ZERO) > 0)
+                ? requestDto.getDiscountAmount()
+                : BigDecimal.ZERO;
+
+        if (discount.compareTo(subtotal) > 0) {
+            throw new BusinessValidationException(
+                    "Discount amount (₹" + discount + ") cannot exceed order subtotal (₹" + subtotal + ").");
+        }
+
+        BigDecimal finalTotal = subtotal.subtract(discount);
+        BigDecimal paid = order.getPaidAmount() != null ? order.getPaidAmount() : BigDecimal.ZERO;
+
+        if (finalTotal.compareTo(paid) < 0) {
+            throw new BusinessValidationException(
+                    "Modified order total (₹" + finalTotal + ") cannot be less than the amount already paid by the buyer (₹" + paid + ").");
+        }
+
+        BigDecimal adjustedTaxAmount = totalTaxAmount;
+        if (discount.compareTo(BigDecimal.ZERO) > 0 && subtotal.compareTo(BigDecimal.ZERO) > 0) {
+            adjustedTaxAmount = totalTaxAmount.multiply(finalTotal)
+                    .divide(subtotal, 2, RoundingMode.HALF_UP);
+        }
+
+        order.setDiscountAmount(discount);
+        order.setTaxAmount(adjustedTaxAmount);
+        order.setSellerRemarks(StringUtils.hasText(requestDto.getSellerRemarks())
+                ? requestDto.getSellerRemarks().trim()
+                : null);
+        order.setTotalAmount(finalTotal);
+
+        BigDecimal returned = order.getReturnedAmount() != null ? order.getReturnedAmount() : BigDecimal.ZERO;
+        BigDecimal netPayable = finalTotal.subtract(returned).max(BigDecimal.ZERO);
+
+        if (paid.compareTo(BigDecimal.ZERO) <= 0) {
+            order.setPaymentStatus(PaymentStatus.UNPAID);
+        } else if (paid.compareTo(netPayable) >= 0) {
+            order.setPaymentStatus(PaymentStatus.PAID);
+        } else {
+            order.setPaymentStatus(PaymentStatus.PARTIALLY_PAID);
+        }
+
+        if (Boolean.TRUE.equals(requestDto.getConfirmImmediately()) && order.getStatus() == OrderStatus.PLACED) {
+            order.setStatus(OrderStatus.CONFIRMED);
+        }
+
+        Order savedOrder = orderRepository.save(order);
+        if (!inventoryLogs.isEmpty()) {
+            inventoryTransactionRepository.saveAll(inventoryLogs);
+        }
+
+        return mapToResponseDto(savedOrder);
     }
 
     @Transactional
@@ -564,9 +424,6 @@ public class OrderService {
             if (!order.getSellerId().equals(caller.getId())) {
                 throw new AccessDeniedException("You are not authorized to update another seller's order.");
             }
-            if (currentStatus == OrderStatus.PLACED) {
-                throw new AccessDeniedException("Orders in PLACED status require Admin confirmation before seller dispatch.");
-            }
         }
 
         if (!currentStatus.canTransitionTo(targetStatus)) {
@@ -580,49 +437,7 @@ public class OrderService {
 
         order.setStatus(targetStatus);
         Order savedOrder = orderRepository.save(order);
-
-        if (caller.getRole() != User.Role.BUYER) {
-            String statusHindi = switch (targetStatus) {
-                case CONFIRMED -> "एडमिन द्वारा कन्फर्म (Confirmed) कर दिया गया है ✅";
-                case PROCESSING -> "गोदाम में पैक (Processing) किया जा रहा है 📦";
-                case SHIPPED -> "गोदाम से डिस्पैच (Out for Delivery) हो चुका है 🚚";
-                case DELIVERED -> "आपकी दुकान पर डिलीवर हो गया है 🎉";
-                case CANCELLED, REJECTED -> "कैंसिल/रिजेक्ट कर दिया गया है ❌";
-                default -> targetStatus.name();
-            };
-
-            notificationRepository.save(com.retail.flow.notification.entity.BuyerNotification.builder()
-                    .customerId(savedOrder.getCustomer().getId())
-                    .senderId(caller.getId())
-                    .orderId(savedOrder.getId())
-                    .title("Order #" + savedOrder.getId() + " — " + targetStatus.name())
-                    .message("आपका होलसेल ऑर्डर #" + savedOrder.getId() + " " + statusHindi)
-                    .isRead(false)
-                    .build());
-            fcmPushService.sendPushToBuyer(
-                    savedOrder.getCustomer().getFcmToken(),
-                    "Order #" + savedOrder.getId() + " — " + targetStatus.name(),
-                    "आपका होलसेल ऑर्डर #" + savedOrder.getId() + " " + statusHindi,
-                    savedOrder.getId()
-            );
-
-            // 🟢 3. जब Admin ऑर्डर का स्टेटस CONFIRMED करे -> Seller के फोन पर तुरंत नोटिफिकेशन भेजें
-            if (targetStatus == OrderStatus.CONFIRMED) {
-                notifySellerOnOrderConfirmed(savedOrder);
-            }
-        }
         return mapToResponseDto(savedOrder);
-    }
-
-    private void notifySellerOnOrderConfirmed(Order confirmedOrder) {
-        if (confirmedOrder == null || confirmedOrder.getSellerId() == null) return;
-        userRepository.findById(confirmedOrder.getSellerId()).ifPresent(seller -> {
-            String sellerTitle = "नया ऑर्डर कन्फर्म हुआ! 📦 (Order #" + confirmedOrder.getId() + ")";
-            String sellerMsg = "Admin ने Order #" + confirmedOrder.getId()
-                    + " अप्रूव कर दिया है (राशि: ₹" + confirmedOrder.getTotalAmount()
-                    + ")। कृपया आइटम पैक करके डिस्पैच करें।";
-            fcmPushService.sendPushToBuyer(seller.getFcmToken(), sellerTitle, sellerMsg, confirmedOrder.getId());
-        });
     }
 
     private void restoreInventoryForOrder(Order order) {
@@ -666,9 +481,6 @@ public class OrderService {
             if (!order.getSellerId().equals(caller.getId())) {
                 throw new AccessDeniedException("You are not authorized to view another seller's order.");
             }
-            if (order.getStatus() == OrderStatus.PLACED) {
-                throw new AccessDeniedException("This order is awaiting Admin approval.");
-            }
         }
 
         return mapToResponseDto(order);
@@ -701,12 +513,6 @@ public class OrderService {
         }
 
         Pageable pageable = buildPageable(page, size);
-        if (caller.getRole() == User.Role.SELLER) {
-            return orderRepository.findBySellerIdAndStatusNot(sellerId, OrderStatus.PLACED, pageable).stream()
-                    .map(this::mapToResponseDto)
-                    .collect(Collectors.toList());
-        }
-
         return orderRepository.findBySellerId(sellerId, pageable).stream()
                 .map(this::mapToResponseDto)
                 .collect(Collectors.toList());
@@ -729,12 +535,6 @@ public class OrderService {
     }
 
     private OrderResponseDto mapToResponseDto(Order order) {
-        boolean hideBuyerDetails = false;
-        var auth = SecurityContextHolder.getContext().getAuthentication();
-        if (auth != null && auth.getPrincipal() instanceof AuthenticatedUserPrincipal principal) {
-            hideBuyerDetails = (principal.getUser().getRole() == User.Role.SELLER);
-        }
-
         List<OrderResponseDto.OrderItemResponseDto> itemDtos = order.getOrderItems().stream()
                 .map(item -> OrderResponseDto.OrderItemResponseDto.builder()
                         .id(item.getId())
@@ -768,18 +568,23 @@ public class OrderService {
         String sellerAddress = seller != null && StringUtils.hasText(seller.getBusinessAddress())
                 ? seller.getBusinessAddress() : "Main Wholesale Market, Uttar Pradesh";
 
+        String resolvedGroupId = StringUtils.hasText(order.getOrderGroupId())
+                ? order.getOrderGroupId()
+                : "FM-" + order.getId();
+
         return OrderResponseDto.builder()
                 .id(order.getId())
+                .orderGroupId(resolvedGroupId)
                 .sellerId(order.getSellerId())
                 .sellerBusinessName(sellerBizName)
                 .sellerGstNumber(sellerGst)
                 .sellerPhone(sellerPhone)
                 .sellerAddress(sellerAddress)
-                .customerId(hideBuyerDetails ? null : order.getCustomer().getId())
-                .customerName(hideBuyerDetails ? ("Order #" + order.getId()) : order.getCustomer().getName())
-                .customerMobile(hideBuyerDetails ? "" : order.getCustomer().getMobile())
+                .customerId(order.getCustomer().getId())
+                .customerName(order.getCustomer().getName())
+                .customerMobile(order.getCustomer().getMobile())
                 .status(order.getStatus().name())
-                .deliveryAddress(hideBuyerDetails ? "Admin Hub Dispatch" : order.getDeliveryAddress())
+                .deliveryAddress(order.getDeliveryAddress())
                 .subtotalAmount(subtotal)
                 .discountAmount(discount)
                 .taxAmount(order.getTaxAmount() != null ? order.getTaxAmount() : BigDecimal.ZERO)

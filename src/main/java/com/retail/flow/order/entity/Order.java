@@ -12,6 +12,7 @@ import java.util.Set;
 
 @Entity
 @Table(name = "orders", indexes = {
+        @Index(name = "idx_orders_group_id", columnList = "order_group_id"),
         @Index(name = "idx_orders_seller_id", columnList = "seller_id"),
         @Index(name = "idx_orders_customer_id", columnList = "customer_id"),
         @Index(name = "idx_orders_status", columnList = "status")
@@ -26,6 +27,10 @@ public class Order {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    // Common Master Order ID shared across all seller sub-orders in a single checkout
+    @Column(name = "order_group_id", length = 40)
+    private String orderGroupId;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "customer_id", nullable = false)
