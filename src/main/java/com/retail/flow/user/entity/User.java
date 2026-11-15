@@ -45,6 +45,10 @@ public class User {
     @Column(name = "business_address", length = 500)
     private String businessAddress;
 
+    // 🟢 नया: Admin और Seller के फोन का FCM Push Token सेव करने के लिए
+    @Column(name = "fcm_token", length = 512)
+    private String fcmToken;
+
     public enum Role {
         ADMIN,
         SELLER,

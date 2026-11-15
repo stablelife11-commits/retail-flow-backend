@@ -146,6 +146,7 @@ public class OrderService {
         }
 
         List<OrderResponseDto> responses = new ArrayList<>();
+        List<User> activeAdmins = userRepository.findByRoleAndActiveTrue(User.Role.ADMIN);
 
         for (Long sellerId : itemsBySeller.keySet()) {
             List<SellerLineItem> sellerItems = itemsBySeller.get(sellerId);
@@ -217,6 +218,14 @@ public class OrderService {
             }
             inventoryTransactionRepository.saveAll(pendingAuditLogs);
 
+            // 🟢 1. जैसे ही Buyer ऑर्डर प्लेस करे -> सभी सक्रिय ADMIN को तुरंत Push Notification भेजें
+            String adminTitle = "नया होलसेल ऑर्डर आया है! 🛒 (Order #" + savedOrder.getId() + ")";
+            String adminBody = "ग्राहक: " + customer.getName() + " • कुल राशि: ₹" + savedOrder.getTotalAmount()
+                    + " • कृपया रिव्यू और कन्फर्म करें।";
+            for (User adminUser : activeAdmins) {
+                fcmPushService.sendPushToBuyer(adminUser.getFcmToken(), adminTitle, adminBody, savedOrder.getId());
+            }
+
             responses.add(mapToResponseDto(savedOrder));
         }
 
@@ -231,7 +240,6 @@ public class OrderService {
         return responses;
     }
 
-    // ✅ FIX 3 IMPLEMENTED: Admin Permission + Multi-Seller Product Routing & Order Splitting
     @Transactional
     public OrderResponseDto modifyOrderBySeller(Long orderId, SellerOrderUpdateRequestDto requestDto, String callerEmail) {
         User caller = currentUserService.getCurrentUser(callerEmail);
@@ -283,7 +291,6 @@ public class OrderService {
             ProductVariant variant = productVariantRepository.findById(itemReq.getVariantId())
                     .orElseThrow(() -> new ResourceNotFoundException("Variant not found with id: " + itemReq.getVariantId()));
 
-            // Normal Seller sirf apne catalog ke variants rakh sakta hai, par ADMIN kisi bhi Seller ka variant assign kar sakta hai
             if (caller.getRole() != User.Role.ADMIN && !variant.getProduct().getSellerId().equals(order.getSellerId())) {
                 throw new BusinessValidationException(
                         "Variant SKU '" + variant.getSku() + "' does not belong to your seller catalog.");
@@ -353,7 +360,11 @@ public class OrderService {
 
         Order savedOrder = orderRepository.save(order);
 
-        // Agar Admin ne ek hi order ke products alag-alag Sellers ko assign kiye hain, toh unke liye naye Orders split karein
+        // 🟢 2A. अगर मुख्य ऑर्डर CONFIRMED है, तो उसके Seller को (बिना Buyer डिटेल के) तुरंत नोटिफिकेशन भेजें
+        if (savedOrder.getStatus() == OrderStatus.CONFIRMED) {
+            notifySellerOnOrderConfirmed(savedOrder);
+        }
+
         for (int i = 1; i < sellerIds.size(); i++) {
             Long splitSellerId = sellerIds.get(i);
             Order splitOrder = Order.builder()
@@ -379,6 +390,11 @@ public class OrderService {
                 tx.setReferenceId(savedSplit.getId());
             }
             inventoryLogs.addAll(splitRes.logs());
+
+            // 🟢 2B. अगर स्प्लिट ऑर्डर भी CONFIRMED है, तो उस दूसरे Seller को भी तुरंत नोटिफिकेशन भेजें
+            if (savedSplit.getStatus() == OrderStatus.CONFIRMED) {
+                notifySellerOnOrderConfirmed(savedSplit);
+            }
         }
 
         if (!inventoryLogs.isEmpty()) {
@@ -548,7 +564,6 @@ public class OrderService {
             if (!order.getSellerId().equals(caller.getId())) {
                 throw new AccessDeniedException("You are not authorized to update another seller's order.");
             }
-            // ✅ FIX 3B: Seller PLACED order ko bina Admin permission ke confirm/modify nahi kar sakta
             if (currentStatus == OrderStatus.PLACED) {
                 throw new AccessDeniedException("Orders in PLACED status require Admin confirmation before seller dispatch.");
             }
@@ -590,8 +605,24 @@ public class OrderService {
                     "आपका होलसेल ऑर्डर #" + savedOrder.getId() + " " + statusHindi,
                     savedOrder.getId()
             );
+
+            // 🟢 3. जब Admin ऑर्डर का स्टेटस CONFIRMED करे -> Seller के फोन पर तुरंत नोटिफिकेशन भेजें
+            if (targetStatus == OrderStatus.CONFIRMED) {
+                notifySellerOnOrderConfirmed(savedOrder);
+            }
         }
         return mapToResponseDto(savedOrder);
+    }
+
+    private void notifySellerOnOrderConfirmed(Order confirmedOrder) {
+        if (confirmedOrder == null || confirmedOrder.getSellerId() == null) return;
+        userRepository.findById(confirmedOrder.getSellerId()).ifPresent(seller -> {
+            String sellerTitle = "नया ऑर्डर कन्फर्म हुआ! 📦 (Order #" + confirmedOrder.getId() + ")";
+            String sellerMsg = "Admin ने Order #" + confirmedOrder.getId()
+                    + " अप्रूव कर दिया है (राशि: ₹" + confirmedOrder.getTotalAmount()
+                    + ")। कृपया आइटम पैक करके डिस्पैच करें।";
+            fcmPushService.sendPushToBuyer(seller.getFcmToken(), sellerTitle, sellerMsg, confirmedOrder.getId());
+        });
     }
 
     private void restoreInventoryForOrder(Order order) {
@@ -661,7 +692,6 @@ public class OrderService {
                 .collect(Collectors.toList());
     }
 
-    // ✅ FIX 3C: Seller ko PLACED status wale orders nahi dikhenge; jab Admin CONFIRMED karega tabhi dikhenge
     @Transactional(readOnly = true)
     public List<OrderResponseDto> getOrdersBySellerId(Long sellerId, String callerEmail, int page, int size) {
         User caller = currentUserService.getCurrentUser(callerEmail);
@@ -698,7 +728,6 @@ public class OrderService {
         return PageRequest.of(safePage, safeSize, Sort.by("id").descending());
     }
 
-    // ✅ FIX 2 IMPLEMENTED: Seller ke liye Buyer details (Name, Mobile, Address, CustomerId) hide ki gayi hain
     private OrderResponseDto mapToResponseDto(Order order) {
         boolean hideBuyerDetails = false;
         var auth = SecurityContextHolder.getContext().getAuthentication();

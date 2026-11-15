@@ -51,7 +51,7 @@ public class NotificationController {
         this.fcmPushService = fcmPushService;
     }
 
-    // 1. BUYER: अपना FCM Device Token रजिस्टर करें
+    // 1. BUYER, SELLER & ADMIN: अपना FCM Device Token रजिस्टर करें
     @PostMapping("/fcm-token")
     @Transactional
     public ResponseEntity<Void> updateFcmToken(
@@ -61,10 +61,30 @@ public class NotificationController {
         if (!StringUtils.hasText(token)) {
             return ResponseEntity.badRequest().build();
         }
-        customerRepository.findByEmail(authentication.getName()).ifPresent(customer -> {
-            customer.setFcmToken(token.trim());
+        String cleanToken = token.trim();
+        String email = authentication.getName();
+
+        // अगर एक ही फोन में पहले किसी दूसरे अकाउंट से लॉगिन था, तो उसका पुराना टोकन हटा दें
+        List<User> existingWithToken = userRepository.findByFcmToken(cleanToken);
+        for (User u : existingWithToken) {
+            if (!u.getEmail().equalsIgnoreCase(email)) {
+                u.setFcmToken(null);
+                userRepository.save(u);
+            }
+        }
+
+        // Users टेबल में टोकन सेव करें (ADMIN और SELLER के लिए)
+        userRepository.findByEmail(email).ifPresent(user -> {
+            user.setFcmToken(cleanToken);
+            userRepository.save(user);
+        });
+
+        // Customers टेबल में टोकन सेव करें (BUYER के लिए)
+        customerRepository.findByEmail(email).ifPresent(customer -> {
+            customer.setFcmToken(cleanToken);
             customerRepository.save(customer);
         });
+
         return ResponseEntity.ok().build();
     }
 
@@ -97,7 +117,6 @@ public class NotificationController {
         String cleanTitle = request.getTitle().trim();
         String cleanMsg = request.getMessage().trim();
 
-        // A. सभी दुकानदारों (All Buyers) के लिए
         if (Boolean.TRUE.equals(request.getSendToAllBuyers())) {
             List<Customer> allCustomers = customerRepository.findAll();
             List<BuyerNotification> batch = new ArrayList<>();
@@ -122,7 +141,6 @@ public class NotificationController {
             ));
         }
 
-        // B. खास ऑर्डर (Order ID) या एक ग्राहक (Customer ID / User ID) के लिए
         Customer targetCustomer = null;
         if (request.getOrderId() != null) {
             Order order = orderRepository.findById(request.getOrderId())
@@ -130,7 +148,6 @@ public class NotificationController {
             targetCustomer = order.getCustomer();
         } else if (request.getCustomerId() != null) {
             Long inputId = request.getCustomerId();
-            // पहले customers टेबल में ढूँढें, अगर न मिले तो users टेबल की ID से ईमेल निकालकर ढूँढें
             targetCustomer = customerRepository.findById(inputId)
                     .orElseGet(() -> userRepository.findById(inputId)
                             .flatMap(u -> customerRepository.findByEmail(u.getEmail()))
