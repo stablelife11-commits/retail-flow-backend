@@ -8,6 +8,9 @@ import com.retail.flow.customer.entity.Customer;
 import com.retail.flow.customer.repository.CustomerRepository;
 import com.retail.flow.inventory.entity.InventoryTransaction;
 import com.retail.flow.inventory.repository.InventoryTransactionRepository;
+import com.retail.flow.notification.entity.BuyerNotification;
+import com.retail.flow.notification.repository.BuyerNotificationRepository;
+import com.retail.flow.notification.service.FcmPushService;
 import com.retail.flow.order.dto.OrderItemRequestDto;
 import com.retail.flow.order.dto.OrderRequestDto;
 import com.retail.flow.order.dto.OrderResponseDto;
@@ -22,6 +25,8 @@ import com.retail.flow.product.repository.ProductVariantRepository;
 import com.retail.flow.user.entity.User;
 import com.retail.flow.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
@@ -44,6 +49,7 @@ import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class OrderService {
@@ -58,6 +64,8 @@ public class OrderService {
     private final UserRepository userRepository;
     private final CurrentUserService currentUserService;
     private final CartRepository cartRepository;
+    private final FcmPushService fcmPushService;
+    private final BuyerNotificationRepository buyerNotificationRepository;
 
     private record SellerLineItem(Long variantId, int quantity) {}
 
@@ -149,9 +157,9 @@ public class OrderService {
                     "Cart contains items from multiple sellers. Please use /api/v1/orders/checkout or place separate orders per seller.");
         }
 
-        // Single Master Order Group ID shared across all seller orders created in this checkout
         String masterOrderGroupId = generateMasterOrderGroupId();
         List<OrderResponseDto> responses = new ArrayList<>();
+        BigDecimal grandCheckoutTotal = BigDecimal.ZERO;
 
         for (Long sellerId : itemsBySeller.keySet()) {
             List<SellerLineItem> sellerItems = itemsBySeller.get(sellerId);
@@ -224,6 +232,7 @@ public class OrderService {
             }
             inventoryTransactionRepository.saveAll(pendingAuditLogs);
 
+            grandCheckoutTotal = grandCheckoutTotal.add(totalAmount);
             responses.add(mapToResponseDto(savedOrder));
         }
 
@@ -234,6 +243,21 @@ public class OrderService {
                 cartRepository.save(cart);
             }
         });
+
+        // 🔔 1. AUTOMATIC NOTIFICATION: NEW ORDER PLACED -> SEND TO ALL ADMINS
+        try {
+            Long firstOrderId = responses.isEmpty() ? null : responses.get(0).getId();
+            String title = "🛍️ New Order Placed: " + masterOrderGroupId;
+            String body = "Buyer " + customer.getName() + " placed an order of ₹" + grandCheckoutTotal
+                    + " (" + responses.size() + " seller lot(s)). Review & approve in Admin Portal.";
+
+            List<User> admins = userRepository.findByRoleAndActiveTrue(User.Role.ADMIN);
+            for (User admin : admins) {
+                fcmPushService.sendPushToAdmin(admin.getFcmToken(), title, body, firstOrderId);
+            }
+        } catch (Exception ex) {
+            log.warn("Failed to send new order FCM alert to Admin: {}", ex.getMessage());
+        }
 
         return responses;
     }
@@ -285,9 +309,13 @@ public class OrderService {
             ProductVariant variant = productVariantRepository.findById(itemReq.getVariantId())
                     .orElseThrow(() -> new ResourceNotFoundException("Variant not found with id: " + itemReq.getVariantId()));
 
-            if (!variant.getProduct().getSellerId().equals(order.getSellerId())) {
+            if (caller.getRole() != User.Role.ADMIN && !variant.getProduct().getSellerId().equals(order.getSellerId())) {
                 throw new BusinessValidationException(
                         "Variant SKU '" + variant.getSku() + "' does not belong to your seller catalog.");
+            }
+
+            if (caller.getRole() == User.Role.ADMIN) {
+                order.setSellerId(variant.getProduct().getSellerId());
             }
 
             if (variant.getStock() < itemReq.getQuantity()) {
@@ -382,13 +410,64 @@ public class OrderService {
             order.setPaymentStatus(PaymentStatus.PARTIALLY_PAID);
         }
 
+        boolean wasConfirmedNow = false;
         if (Boolean.TRUE.equals(requestDto.getConfirmImmediately()) && order.getStatus() == OrderStatus.PLACED) {
             order.setStatus(OrderStatus.CONFIRMED);
+            wasConfirmedNow = true;
         }
 
         Order savedOrder = orderRepository.save(order);
         if (!inventoryLogs.isEmpty()) {
             inventoryTransactionRepository.saveAll(inventoryLogs);
+        }
+
+        // 🔔 2. AUTOMATIC NOTIFICATION: ADMIN ROUTED / APPROVED OR SELLER MODIFIED
+        try {
+            String displayRef = StringUtils.hasText(savedOrder.getOrderGroupId()) ? savedOrder.getOrderGroupId() : "#" + savedOrder.getId();
+
+            if (wasConfirmedNow || caller.getRole() == User.Role.ADMIN) {
+                // Notify Seller
+                User assignedSeller = userRepository.findById(savedOrder.getSellerId()).orElse(null);
+                if (assignedSeller != null) {
+                    fcmPushService.sendPushToSeller(
+                            assignedSeller.getFcmToken(),
+                            "📦 New Order Assigned (#" + savedOrder.getId() + ")",
+                            "Admin approved Order #" + savedOrder.getId() + " (₹" + savedOrder.getTotalAmount() + "). Please process.",
+                            savedOrder.getId()
+                    );
+                }
+
+                // Notify Buyer & Save DB Notification
+                String title = "✅ Order Approved (" + displayRef + ")";
+                String body = "Your wholesale order lot #" + savedOrder.getId() + " has been verified & confirmed (Total: ₹" + savedOrder.getTotalAmount() + ").";
+
+                buyerNotificationRepository.save(BuyerNotification.builder()
+                        .customerId(savedOrder.getCustomer().getId())
+                        .senderId(caller.getId())
+                        .orderId(savedOrder.getId())
+                        .title(title)
+                        .message(body)
+                        .isRead(false)
+                        .build());
+                fcmPushService.sendPushToBuyer(savedOrder.getCustomer().getFcmToken(), title, body, savedOrder.getId());
+
+            } else {
+                // Seller modified items -> Notify Buyer
+                String title = "✏️ Order Updated (" + displayRef + ")";
+                String body = "Seller updated your order details. Revised Total: ₹" + savedOrder.getTotalAmount();
+
+                buyerNotificationRepository.save(BuyerNotification.builder()
+                        .customerId(savedOrder.getCustomer().getId())
+                        .senderId(caller.getId())
+                        .orderId(savedOrder.getId())
+                        .title(title)
+                        .message(body)
+                        .isRead(false)
+                        .build());
+                fcmPushService.sendPushToBuyer(savedOrder.getCustomer().getFcmToken(), title, body, savedOrder.getId());
+            }
+        } catch (Exception ex) {
+            log.warn("Failed to send order routing/modification FCM notification: {}", ex.getMessage());
         }
 
         return mapToResponseDto(savedOrder);
@@ -437,6 +516,68 @@ public class OrderService {
 
         order.setStatus(targetStatus);
         Order savedOrder = orderRepository.save(order);
+
+        // 🔔 3. AUTOMATIC NOTIFICATION: SELLER / ADMIN STATUS CHANGE -> NOTIFY BUYER
+        try {
+            String displayRef = StringUtils.hasText(savedOrder.getOrderGroupId()) ? savedOrder.getOrderGroupId() : "#" + savedOrder.getId();
+
+            if (caller.getRole() == User.Role.BUYER && targetStatus == OrderStatus.CANCELLED) {
+                String title = "❌ Order Cancelled (" + displayRef + ")";
+                String body = "Buyer " + savedOrder.getCustomer().getName() + " cancelled order lot #" + savedOrder.getId();
+                List<User> admins = userRepository.findByRoleAndActiveTrue(User.Role.ADMIN);
+                for (User admin : admins) {
+                    fcmPushService.sendPushToAdmin(admin.getFcmToken(), title, body, savedOrder.getId());
+                }
+            } else {
+                String title;
+                String body;
+                switch (targetStatus) {
+                    case CONFIRMED -> {
+                        title = "✅ Order Confirmed (" + displayRef + ")";
+                        body = "Your wholesale order lot #" + savedOrder.getId() + " has been confirmed by the seller.";
+                        if (caller.getRole() == User.Role.ADMIN) {
+                            User assignedSeller = userRepository.findById(savedOrder.getSellerId()).orElse(null);
+                            if (assignedSeller != null) {
+                                fcmPushService.sendPushToSeller(assignedSeller.getFcmToken(), title, body, savedOrder.getId());
+                            }
+                        }
+                    }
+                    case PROCESSING -> {
+                        title = "⚙️ Order Packing Started (" + displayRef + ")";
+                        body = "Your order lot #" + savedOrder.getId() + " is currently being packed.";
+                    }
+                    case SHIPPED -> {
+                        title = "🚚 Order Dispatched (" + displayRef + ")";
+                        body = "Your order lot #" + savedOrder.getId() + " has been dispatched / out for delivery!";
+                    }
+                    case DELIVERED -> {
+                        title = "🎉 Order Delivered (" + displayRef + ")";
+                        body = "Your order lot #" + savedOrder.getId() + " has been successfully delivered.";
+                    }
+                    case REJECTED, CANCELLED -> {
+                        title = "❌ Order " + targetStatus.name() + " (" + displayRef + ")";
+                        body = "Your order lot #" + savedOrder.getId() + " was " + targetStatus.name().toLowerCase() + ".";
+                    }
+                    default -> {
+                        title = "Order Status Update (" + displayRef + ")";
+                        body = "Your order status is now " + targetStatus.name() + ".";
+                    }
+                }
+
+                buyerNotificationRepository.save(BuyerNotification.builder()
+                        .customerId(savedOrder.getCustomer().getId())
+                        .senderId(caller.getId())
+                        .orderId(savedOrder.getId())
+                        .title(title)
+                        .message(body)
+                        .isRead(false)
+                        .build());
+                fcmPushService.sendPushToBuyer(savedOrder.getCustomer().getFcmToken(), title, body, savedOrder.getId());
+            }
+        } catch (Exception ex) {
+            log.warn("Failed to send status update notification: {}", ex.getMessage());
+        }
+
         return mapToResponseDto(savedOrder);
     }
 
@@ -513,7 +654,12 @@ public class OrderService {
         }
 
         Pageable pageable = buildPageable(page, size);
-        return orderRepository.findBySellerId(sellerId, pageable).stream()
+        // ✅ FIX: Sellers do not see orders until Admin approves/routes them (i.e. status != PLACED)
+        Page<Order> orderPage = (caller.getRole() == User.Role.ADMIN)
+                ? orderRepository.findBySellerId(sellerId, pageable)
+                : orderRepository.findBySellerIdAndStatusNot(sellerId, OrderStatus.PLACED, pageable);
+
+        return orderPage.stream()
                 .map(this::mapToResponseDto)
                 .collect(Collectors.toList());
     }

@@ -47,8 +47,26 @@ public class FcmPushService {
         }
     }
 
+    // 1. Buyer को Push Notification भेजने के लिए
     public void sendPushToBuyer(String fcmToken, String title, String body, Long orderId) {
-        if (!StringUtils.hasText(fcmToken) || FirebaseApp.getApps().isEmpty()) {
+        sendPushInternal(fcmToken, title, body, orderId, "BUYER");
+    }
+
+    // 2. Seller को Push Notification भेजने के लिए
+    public void sendPushToSeller(String fcmToken, String title, String body, Long orderId) {
+        sendPushInternal(fcmToken, title, body, orderId, "SELLER");
+    }
+
+    // 3. Admin को Push Notification भेजने के लिए
+    public void sendPushToAdmin(String fcmToken, String title, String body, Long orderId) {
+        sendPushInternal(fcmToken, title, body, orderId, "ADMIN");
+    }
+
+    private void sendPushInternal(String fcmToken, String title, String body, Long orderId, String targetRole) {
+        if (!StringUtils.hasText(fcmToken)) {
+            return;
+        }
+        if (FirebaseApp.getApps().isEmpty()) {
             return;
         }
 
@@ -62,6 +80,7 @@ public class FcmPushService {
                                 .build())
                         .putData("title", title)
                         .putData("message", body)
+                        .putData("targetRole", targetRole)
                         .putData("orderId", orderId != null ? String.valueOf(orderId) : "")
                         .setAndroidConfig(AndroidConfig.builder()
                                 .setPriority(AndroidConfig.Priority.HIGH)
@@ -75,7 +94,7 @@ public class FcmPushService {
 
                 FirebaseMessaging.getInstance().send(message);
             } catch (Exception e) {
-                log.warn("FCM push delivery failed: {}", e.getMessage());
+                log.warn("FCM push delivery failed for {} (Order #{}): {}", targetRole, orderId, e.getMessage());
             }
         });
     }
