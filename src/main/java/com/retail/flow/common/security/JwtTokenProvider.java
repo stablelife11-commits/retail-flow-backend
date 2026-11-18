@@ -22,12 +22,15 @@ public class JwtTokenProvider {
     private static final String INSECURE_DEFAULT_SECRET =
             "YourSuperSecretKeyForRetailFlowBackendJwtAuthenticationWithEnoughLengthForHS512AlgorithmSecureKey";
 
+    // Renew token automatically when less than 30 days remain
+    private static final long RENEWAL_THRESHOLD_MS = 30L * 24 * 60 * 60 * 1000;
+
     private final Environment environment;
 
     @Value("${app.jwt.secret}")
     private String jwtSecret;
 
-    @Value("${app.jwt.expiration}")
+    @Value("${app.jwt.expiration:31536000000}")
     private long jwtExpirationInMs;
 
     private SecretKey signingKey;
@@ -86,6 +89,17 @@ public class JwtTokenProvider {
             getClaims(authToken);
             return true;
         } catch (JwtException | IllegalArgumentException ex) {
+            return false;
+        }
+    }
+
+    public boolean shouldRenewToken(String authToken) {
+        try {
+            Date expiration = getClaims(authToken).getExpiration();
+            if (expiration == null) return false;
+            long remainingMs = expiration.getTime() - System.currentTimeMillis();
+            return remainingMs > 0 && remainingMs < RENEWAL_THRESHOLD_MS;
+        } catch (Exception ex) {
             return false;
         }
     }

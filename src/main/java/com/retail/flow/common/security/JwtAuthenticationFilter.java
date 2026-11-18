@@ -36,7 +36,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
                 // Block suspended/deactivated users even if their JWT has not expired yet
                 if (userOpt.isPresent() && Boolean.TRUE.equals(userOpt.get().getActive())) {
-                    AuthenticatedUserPrincipal principal = new AuthenticatedUserPrincipal(userOpt.get());
+                    User user = userOpt.get();
+                    AuthenticatedUserPrincipal principal = new AuthenticatedUserPrincipal(user);
 
                     UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
                             principal, null, principal.getAuthorities()
@@ -44,6 +45,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
 
                     SecurityContextHolder.getContext().setAuthentication(authentication);
+
+                    // Sliding Session: Auto-issue a fresh 1-year token if less than 30 days remain
+                    if (tokenProvider.shouldRenewToken(jwt)) {
+                        String freshToken = tokenProvider.generateToken(user.getId(), user.getEmail(), user.getRole().name());
+                        response.setHeader("X-Renewed-Token", freshToken);
+                    }
                 }
             }
         } catch (Exception ex) {
