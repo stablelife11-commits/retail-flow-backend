@@ -55,6 +55,9 @@ public class SecurityConfig {
                         // 1. Public: Buyer and Seller apps can check for updates without login
                         .requestMatchers(HttpMethod.GET, "/api/v1/app-update/check").permitAll()
 
+                        // Public: Buyer app home banners
+                        .requestMatchers(HttpMethod.GET, "/api/v1/banners/active").permitAll()
+
                         // 2. Strictly ADMIN Only: Only ADMIN can publish a new app update
                         .requestMatchers(HttpMethod.PUT, "/api/v1/app-update").hasRole("ADMIN")
 
